@@ -18,7 +18,7 @@ on:
         description: '压缩包路径'
         required: true
       out_trade_no:
-        description: '商户订单号（网页自动生成）'
+        description: '商户订单号'
         required: true
 
 env:
@@ -33,131 +33,50 @@ jobs:
       - uses: actions/checkout@v4
 
       # ============================================================
-      # 创建订单 → 回传支付链接到网页（通过 Issue）
-      # ============================================================
-      - name: 创建订单并回传支付链接
-        id: create_order
-        run: |
-          set -e
-          TYPE="alipay"
-          MONEY="0.05"
-          NAME="elf2os-${{ inputs.name }}"
-          OUT_TRADE_NO="${{ inputs.out_trade_no }}"
-          NOTIFY="https://example.com/notify"
-          RETURN="https://example.com/return"
-          CLIENT_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
-
-          echo "订单号: $OUT_TRADE_NO"
-          echo "clientip: $CLIENT_IP"
-
-          # MD5 签名
-          SIGN=$(python3 -c "
-          import hashlib,sys
-          p={'pid':sys.argv[1],'type':sys.argv[2],'money':sys.argv[3],'name':sys.argv[4],'out_trade_no':sys.argv[5],'notify_url':sys.argv[6],'return_url':sys.argv[7],'clientip':sys.argv[8]}
-          s='&'.join([k+'='+p[k] for k in sorted(p)])+sys.argv[9]
-          print(hashlib.md5(s.encode()).hexdigest())
-          " "$PID" "$TYPE" "$MONEY" "$NAME" "$OUT_TRADE_NO" "$NOTIFY" "$RETURN" "$CLIENT_IP" "$KEY")
-
-          echo "签名: $SIGN"
-
-          # POST 创建订单
-          RESP=$(curl -s -X POST "https://api.payqixiang.cn/mapi.php" \
-            --data-urlencode "pid=$PID" \
-            --data-urlencode "type=$TYPE" \
-            --data-urlencode "money=$MONEY" \
-            --data-urlencode "name=$NAME" \
-            --data-urlencode "out_trade_no=$OUT_TRADE_NO" \
-            --data-urlencode "notify_url=$NOTIFY" \
-            --data-urlencode "return_url=$RETURN" \
-            --data-urlencode "clientip=$CLIENT_IP" \
-            --data-urlencode "sign=$SIGN" \
-            --data-urlencode "sign_type=MD5")
-
-          echo "RESP=$RESP"
-
-          # 提取 payurl
-          PAYURL=$(python3 -c "
-          import json,sys
-          d=json.loads(sys.stdin.read())
-          print(d['payurl'] if d.get('code')==1 else '')
-          " <<< "$RESP")
-
-          if [ -z "$PAYURL" ]; then
-            echo "❌ 创建订单失败"
-            exit 1
-          fi
-
-          echo "payurl=$PAYURL" >> $GITHUB_OUTPUT
-          echo "PAYURL=$PAYURL" >> $GITHUB_ENV
-
-          # 创建 Issue 回传支付链接给网页
-          curl -s -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/issues" \
-            -d "{\"title\":\"pay_${{ inputs.out_trade_no }}\",\"body\":\"${PAYURL}\",\"labels\":[\"payurl\"]}"
-
-          echo "✅ 支付链接已回传"
-
-      # ============================================================
-      # 轮询等待支付
+      # 轮询等待支付（订单由网页端创建，Actions 只查单）
       # ============================================================
       - name: 等待支付
         run: |
           set -e
-          OUT_TRADE_NO="${{ inputs.out_trade_no }}"
-
           echo "开始轮询支付状态（最多10分钟）..."
-
           for i in $(seq 1 60); do
             sleep 10
-            Q=$(curl -s "https://api.payqixiang.cn/api.php?act=order&pid=$PID&key=$KEY&out_trade_no=$OUT_TRADE_NO")
-            STATUS=$(python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('status','0'))" <<< "$Q")
-            echo "  轮询 ${i}: status=$STATUS"
+            RESP=$(curl -s "https://api.payqixiang.cn/api.php?act=order&pid=$PID&key=$KEY&out_trade_no=${{ inputs.out_trade_no }}")
+            CODE=$(echo "$RESP" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("code","0"))')
+            STATUS=$(echo "$RESP" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("status","0"))')
+            echo "  轮询 ${i}: code=$CODE status=$STATUS"
             if [ "$STATUS" = "1" ]; then
-              echo "✅ 支付成功，开始构建！"
-              # 关闭回传用的 Issue
-              curl -s -X PATCH \
-                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create_order.outputs.payurl && '' }}" \
-                -d '{"state":"closed"}' 2>/dev/null || true
+              echo "✅ 支付成功！"
               exit 0
             fi
           done
-
-          echo "❌ 超时未支付，构建终止"
+          echo "❌ 超时未支付"
           exit 1
 
       # ============================================================
       # 解压
       # ============================================================
-      - name: Extract package
+      - name: 解压压缩包
         run: |
-          PKG="${{ inputs.package }}"
-          mkdir -p build/input
-          if [[ "$PKG" == *.zip ]]; then
-            unzip -o "$PKG" -d build/input
-          elif [[ "$PKG" == *.tar.gz || "$PKG" == *.tgz ]]; then
-            tar -xzf "$PKG" -C build/input
+          mkdir -p build/input build/output
+          if [[ "${{ inputs.package }}" == *.zip ]]; then
+            unzip -o "${{ inputs.package }}" -d build/input
+          elif [[ "${{ inputs.package }}" == *.tar.gz || "${{ inputs.package }}" == *.tgz ]]; then
+            tar -xzf "${{ inputs.package }}" -C build/input
           else
-            echo "❌ 不支持的压缩格式"
+            echo "❌ 不支持的格式"
             exit 1
           fi
           ELF=$(find build/input -name "os.elf" | head -1)
-          if [ -z "$ELF" ]; then
-            echo "❌ 压缩包中未找到 os.elf"
-            exit 1
-          fi
-          echo "找到 os.elf: $ELF"
+          if [ -z "$ELF" ]; then echo "❌ 未找到 os.elf"; exit 1; fi
+          echo "找到: $ELF"
 
       # ============================================================
       # 编译 ISO
       # ============================================================
-      - name: Build ISO
+      - name: 编译 ISO
         run: |
           ELF=$(find build/input -name "os.elf" | head -1)
-          mkdir -p build/output
           python3 elf2os.py \
             --arch "${{ inputs.arch }}" \
             --名称 "${{ inputs.name }}" \
@@ -167,7 +86,7 @@ jobs:
       # ============================================================
       # 上传 Release
       # ============================================================
-      - name: Upload Release
+      - name: 上传 Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "build-${{ inputs.build_id }}"
