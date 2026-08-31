@@ -1,0 +1,58 @@
+name: OAuth Token Exchange
+
+on:
+  workflow_dispatch:
+    inputs:
+      code:
+        description: "GitHub OAuth authorization code"
+        required: true
+      state:
+        description: "OAuth state (for matching)"
+        required: true
+
+jobs:
+  exchange:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      token: ${{ steps.exchange.outputs.token }}
+      error: ${{ steps.exchange.outputs.error }}
+    steps:
+      - name: Exchange code for access_token
+        id: exchange
+        env:
+          CODE: ${{ inputs.code }}
+          CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
+          REDIRECT_URI: ${{ secrets.OAUTH_REDIRECT_URI }}
+        run: |
+          echo "::set-output name=token::"
+          echo "::set-output name=error::"
+
+          RESP=$(curl -s -X POST https://github.com/login/oauth/access_token \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -d "{\"client_id\":\"$CLIENT_ID\",\"client_secret\":\"$CLIENT_SECRET\",\"code\":\"$CODE\",\"redirect_uri\":\"$REDIRECT_URI\"}")
+
+          echo "GitHub response: $RESP"
+
+          TOKEN=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
+          ERROR=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null || echo "")
+
+          if [ -n "$TOKEN" ]; then
+            echo "::set-output name=token::$TOKEN"
+          else
+            echo "::set-output name=error::${ERROR:-no_token_returned}"
+          fi
+
+      - name: Write token to summary (for frontend to read)
+        if: steps.exchange.outputs.token != ''
+        run: |
+          echo "${{ steps.exchange.outputs.token }}" > token.txt
+          echo "✅ Token acquired successfully" >> $GITHUB_STEP_SUMMARY
+
+      - name: Write error to summary
+        if: steps.exchange.outputs.token == ''
+        run: |
+          echo "❌ Exchange failed: ${{ steps.exchange.outputs.error }}" >> $GITHUB_STEP_SUMMARY
