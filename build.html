@@ -104,7 +104,7 @@ function generateOutTradeNo(){
   return "elf2os-" + Date.now() + "-" + Math.random().toString(36).slice(2,8);
 }
 
-// ✅ 修复 MD5 签名：参数值不编码参与签名，末尾直接拼接 KEY
+// ✅ MD5 签名：参数值不编码参与签名，末尾直接拼接 KEY
 function buildPayUrl(out_trade_no){
   const signParams = {
     pid: PID,
@@ -184,27 +184,45 @@ async function startBuild(){
   }catch(e){log("❌ "+e.message,"err");btn.disabled=false}
 }
 
+// ✅ 修复：优先读取 Actions 上报的状态文件，避免未支付就显示已支付 / 支付后卡住
 async function pollActions(forkName, out_trade_no, payUrl, btn, build_id){
   let payShown=false;
   for(let i=0;i<120;i++){
     await new Promise(r=>setTimeout(r,5000));
     try{
+      // 优先读状态文件（权威来源）
+      const statusResp=await fetch(`https://raw.githubusercontent.com/${forkName}/main/status/${out_trade_no}.json?t=${Date.now()}`);
+      if(statusResp.ok){
+        const st=await statusResp.json();
+
+        if(st.status==="waiting_payment" && !payShown){
+          payShown=true;
+          document.getElementById("payUrlLink").href=payUrl;
+          document.getElementById("payUrlLink").textContent=payUrl;
+          document.getElementById("payArea").style.display="block";
+          setProgress(20,"⏳ 请完成支付...");
+          log("💰 支付链接已展示，请付款...","ok");
+        }
+
+        if(st.status==="paid"){
+          setProgress(50,"✅ 已支付，编译中（解压→编译→上传）...");
+          log("✅ 检测到支付成功，开始编译...","ok");
+        }
+
+        if(st.status==="timeout"){
+          setProgress(0,"❌ 支付超时");
+          log("❌ 支付超时，请重新构建","err");
+          btn.disabled=false;
+          return;
+        }
+      }
+
+      // 同时查 Actions 运行的最终状态
       const resp=await api("/repos/"+forkName+"/actions/runs?per_page=5");
       const data=await resp.json();
       const run=data.workflow_runs&&data.workflow_runs.find(r=>r.name==="elf2os build");
       if(!run) continue;
 
-      if(!payShown && (run.status==="queued" || run.status==="in_progress")){
-        payShown=true;
-        document.getElementById("payUrlLink").href=payUrl;
-        document.getElementById("payUrlLink").textContent=payUrl;
-        document.getElementById("payArea").style.display="block";
-        setProgress(20,"⏳ 请完成支付，付完后自动继续...");
-        log("💰 支付链接已展示，请付款...","ok");
-      }
-      if(run.status==="in_progress" && payShown){
-        setProgress(50,"✅ 已支付，编译中（解压→编译→上传）...");
-      }
       if(run.status==="completed"){
         if(run.conclusion==="success"){
           setProgress(100,"🎉 构建完成！");
@@ -214,9 +232,12 @@ async function pollActions(forkName, out_trade_no, payUrl, btn, build_id){
           setProgress(0,"❌ 构建失败: "+run.conclusion);
           log("❌ 构建失败","err");
         }
-        btn.disabled=false;return;
+        btn.disabled=false;
+        return;
       }
-    }catch(e){}
+    }catch(e){
+      console.error(e);
+    }
     if(!payShown) setProgress(10+i,"等待 Actions 启动...");
   }
   log("⏱️ 超时，请手动查看 Actions 页面","err");
