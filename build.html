@@ -5,7 +5,7 @@
 <title>elf2os 在线构建</title>
 <style>
 body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f6f8fa;margin:0;padding:16px}
-.box{background:#fff;padding:32px;border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.08);max-width:520px;width:100%}
+.box{background:#fff;padding:32px;border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.08);max-width:540px;width:100%}
 h2{margin-top:0}
 label{display:block;margin:12px 0 4px;font-size:13px;color:#57606a}
 select,input[type=text],input[type=file]{width:100%;padding:9px;border:1px solid #d0d7de;border-radius:6px;box-sizing:border-box}
@@ -13,10 +13,10 @@ input.pat{font-family:monospace;font-size:13px}
 button{padding:11px 22px;background:#1f883d;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;margin-top:16px}
 button:hover{background:#1a7f37}
 button:disabled{background:#94d3a2;cursor:not-allowed}
-.log{margin-top:16px;font-size:13px;color:#57606a;white-space:pre-wrap;max-height:260px;overflow:auto;background:#f6f8fa;padding:10px;border-radius:6px}
+.log{margin-top:16px;font-size:13px;color:#57606a;white-space:pre-wrap;max-height:280px;overflow:auto;background:#f6f8fa;padding:10px;border-radius:6px}
 .err{color:#cf222e}
 .ok{color:#1a7f37}
-.hint{font-size:12px;color:#57606a;margin-top:6px}
+.hint{font-size:12px;color:#57606a;margin-top:6px;line-height:1.6}
 .pat-link{font-size:13px;color:#0969da;text-decoration:none;font-weight:600}
 .pat-link:hover{text-decoration:underline}
 </style>
@@ -30,17 +30,14 @@ button:disabled{background:#94d3a2;cursor:not-allowed}
 const BASE = "https://anonymous123456988.github.io/elfos";
 const REPO = "anonymous123456988/elfos"; // 模板仓库（fork 源）
 
-// ===== 需要改：把 owner 换成你的 GitHub 用户名 =====
-const OWNER = "anonymous123456988";
-
 const savedPat = localStorage.getItem("elfos_pat");
 const area = document.getElementById("area");
 
 if (!savedPat) {
   area.innerHTML = `
-    <label>Fine-grained PAT</label>
+    <label>Fine-grained PAT（仅需一次）</label>
     <input id="pat" class="pat" type="password" placeholder="ghp_xxx 或 github_pat_xxx">
-    <div class="hint">仅需一次。需要绑定 <b>${REPO}</b> 仓库，权限：Administration 读写、Contents 读写、Actions 读写、Workflows 读写。</div>
+    <div class="hint">推荐用 <b>Classic PAT</b>（勾 <code>repo</code> + <code>workflow</code>），用于在你自己账号下 Fork 并构建，不会写我的仓库。</div>
     <div class="hint">还没有 PAT？<a class="pat-link" href="${patCreateUrl()}" target="_blank" rel="noopener">点击这里一键创建 →</a></div>
     <button onclick="savePat()">保存并继续</button>
     <div class="log" id="log"></div>`;
@@ -56,31 +53,18 @@ if (!savedPat) {
     </select>
     <label>OS 名称</label>
     <input id="os_name" type="text" value="myos">
-    <label>build_id（对应 ELF 文件名，留空则用 OS 名称）</label>
+    <label>build_id（对应产物标识，留空则用 OS 名称）</label>
     <input id="build_id" type="text" placeholder="如 v1">
-    <label>用户程序 ELF 文件（可选，不传则只编译内核）</label>
-    <input id="elf" type="file" accept=".elf,.bin">
+    <label>压缩包（<b>必须包含 os.elf</b>，支持 .zip / .tar.gz / .tgz）</label>
+    <input id="pkg" type="file" accept=".zip,.tar.gz,.tgz">
+    <div class="hint">把 os.elf（以及其它需要打包进 ISO 的文件，如引导程序、配置、资源）一起压缩成一个压缩包上传。Actions 会自动解压、定位 os.elf 并打包 ISO。</div>
     <button id="btn" onclick="forkAndBuild()">Fork 并构建</button>
     <div class="log" id="log">就绪</div>`;
 }
 
-// 生成预填了参数的 PAT 创建链接
+// 一键创建 Classic PAT（预填 repo + workflow）
 function patCreateUrl() {
-  // GitHub 支持通过 query 预填部分字段（name、expiration、scopes 等）
-  const params = new URLSearchParams({
-    name: "elf2os-build",                    // 预填名称
-    expiration: "90days",                    // 90 天过期
-    description: "用于 elf2os 在线构建（Fork + Actions）",
-    // Fine-grained PAT 的 scope 参数（GitHub 会识别）
-    "scopes[]": [
-      "repo:status",
-      "repo_deployment",
-      "public_repo",
-      "workflow"
-    ].join(",")
-  });
-  // target=personal 表示创建在个人账号下；fine_grained=1 进入细粒度页
-  return `https://github.com/settings/tokens/new?${params.toString()}&target=personal`;
+  return "https://github.com/settings/tokens/new?name=elf2os-build&expiration=90days&scopes[]=repo&scopes[]=workflow&target=personal";
 }
 
 function savePat() {
@@ -115,6 +99,19 @@ function log(msg, cls) {
   if (cls) e.className = "log " + cls;
 }
 
+// ===== 关键修复：用 FileReader 读 base64，不再爆栈 =====
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result; // data:;base64,xxxx
+      resolve(result.split(",")[1]); // 只要 base64 部分
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 async function forkAndBuild() {
   const btn = document.getElementById("btn");
   btn.disabled = true;
@@ -123,55 +120,68 @@ async function forkAndBuild() {
   const arch = document.getElementById("arch").value;
   const os_name = document.getElementById("os_name").value || "myos";
   const build_id = document.getElementById("build_id").value || os_name;
-  const elfFile = document.getElementById("elf").files[0];
+  const pkgFile = document.getElementById("pkg").files[0];
+
+  if (!pkgFile) { log("❌ 请先选择压缩包（须含 os.elf）", "err"); btn.disabled = false; return; }
 
   try {
+    // ① Fork
     log("① Fork 模板仓库...");
     let res = await api("/repos/" + REPO + "/forks", { method: "POST" });
-    if (res.status === 404) throw new Error("仓库不存在或 PAT 无权限");
     if (res.status === 401) throw new Error("PAT 无效或已过期");
-    if (res.status === 403) throw new Error("PAT 权限不足：需 Administration 读写 + Contents 读写（点下方链接检查）");
+    if (res.status === 403) throw new Error("PAT 权限不足：需 Classic PAT 勾 repo + workflow，或 Fine-grained 先网页 Fork 后再绑定自己的 fork");
+    if (res.status === 404) throw new Error("仓库不存在");
     const fork = await res.json();
     const forkName = fork.full_name;
     if (!forkName) throw new Error("Fork 失败：" + JSON.stringify(fork));
     log("  → " + forkName, "ok");
 
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise(r => setTimeout(r, 6000));
 
-    if (elfFile) {
-      log("② 上传 ELF...");
-      const buf = await elfFile.arrayBuffer();
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-      let sha = null;
-      const exist = await api(`/repos/${forkName}/contents/elf/${build_id}.elf?ref=main`);
-      if (exist.ok) sha = (await exist.json()).sha;
-      const put = await api(`/repos/${forkName}/contents/elf/${build_id}.elf`, {
-        method: "PUT",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({
-          message: "elf2os: upload " + build_id + ".elf",
-          branch: "main",
-          content: b64,
-          sha: sha
-        })
-      });
-      if (!put.ok) throw new Error("上传失败：" + (await put.json()).message);
-      log("  ✓ ELF 已上传", "ok");
-    } else {
-      log("② 跳过 ELF 上传");
+    // ② 上传压缩包到 elf/<build_id>.pkg（保留原始扩展名，Actions 据此选择解压方式）
+    log("② 上传压缩包 " + pkgFile.name + " (" + (pkgFile.size/1024).toFixed(1) + " KB) ...");
+    const b64 = await fileToBase64(pkgFile);
+    const ext = pkgFile.name.includes(".tar.gz") ? ".tar.gz"
+              : pkgFile.name.endsWith(".tgz") ? ".tgz"
+              : pkgFile.name.endsWith(".zip") ? ".zip" : ".bin";
+    const path = `elf/${build_id}.pkg${ext}`;
+
+    let sha = null;
+    const exist = await api(`/repos/${forkName}/contents/${path}?ref=main`);
+    if (exist.ok) sha = (await exist.json()).sha;
+
+    const put = await api(`/repos/${forkName}/contents/${path}`, {
+      method: "PUT",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        message: "elf2os: upload package " + build_id,
+        branch: "main",
+        content: b64,
+        sha: sha
+      })
+    });
+    if (!put.ok) {
+      const err = await put.json();
+      throw new Error("上传失败：" + err.message + (err.errors ? " "+JSON.stringify(err.errors) : ""));
     }
+    log("  ✓ 压缩包已上传 → " + path, "ok");
 
+    // ③ 触发构建（传包名，Actions 自动解压 + 定位 os.elf + 打包 ISO）
     log("③ 触发 Actions 构建...");
     const disp = await api(`/repos/${forkName}/actions/workflows/build.yml/dispatches`, {
       method: "POST",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ ref: "main", inputs: { arch, name: os_name, build_id } })
+      body: JSON.stringify({
+        ref: "main",
+        inputs: { arch, name: os_name, build_id, package: path }
+      })
     });
     if (disp.status !== 204) throw new Error("触发失败：" + disp.status);
     log("  ✓ 已触发，等待构建...", "ok");
 
+    // ④ 轮询
     log("④ 轮询结果（每 15 秒检查一次）...");
-    pollStatus(forkName, arch, os_name);
+    pollStatus(forkName);
 
   } catch (e) {
     log("❌ " + e.message, "err");
@@ -179,11 +189,11 @@ async function forkAndBuild() {
   }
 }
 
-async function pollStatus(forkName, arch, os_name) {
+async function pollStatus(forkName) {
   for (let i = 0; i < 80; i++) {
     await new Promise(r => setTimeout(r, 15000));
     try {
-      const runs = await api(`/repos/${forkName}/actions/runs?per_page=5`).then(r => r.json());
+      const runs = await api(`/repos/${forkName}/actions/runs?per_page=10`).then(r => r.json());
       const run = runs.workflow_runs && runs.workflow_runs.find(r => r.name === "elf2os build");
       if (!run) continue;
 
