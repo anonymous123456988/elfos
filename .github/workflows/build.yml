@@ -4,58 +4,57 @@ on:
   workflow_dispatch:
     inputs:
       arch:
+        description: '架构'
         required: true
-        description: "架构 (x86_64/riscv64等)"
+        default: 'x86_64'
       name:
+        description: 'OS名称'
         required: true
-        description: "OS名称"
+        default: 'myos'
       build_id:
+        description: '构建ID'
         required: true
-        description: "构建ID"
       package:
+        description: '压缩包路径'
         required: true
-        description: "压缩包路径"
 
 jobs:
-  verify-and-build:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Create Order & Wait Payment
-        id: pay
+      # ===== 第一步：创建订单并等待付款 =====
+      - name: 创建订单并等待付款
         env:
-          PID: ${{ secrets.QIXIANG_PID }}
-          KEY: ${{ secrets.QIXIANG_KEY }}
-          BUILD_ID: ${{ inputs.build_id }}
+          PID: "4146"
+          KEY: "m836w016zFmc1mSq1SQW6Xmw60C1MSmZ"
+          MONEY: "0.05"
+          TYPE: "wxpay" # 默认微信，可改 alipay
+          NOTIFY_URL: "https://example.com/notify"
+          RETURN_URL: "https://example.com/return"
         run: |
           set -e
-          MONEY="0.05"
-          NAME="elf2os-${BUILD_ID}"
-          OUT_TRADE_NO="elf2os_${BUILD_ID}_$(date +%s)"
-          NOTIFY_URL="https://example.com/notify"  # 用不到但必填，随便填
-          RETURN_URL="https://example.com/return"
-          TYPE="alipay"  # 默认支付宝，可改 wxpay
-
-          # ===== 1. 创建订单（mapi.php 返回JSON）=====
-          # MD5签名：参数升序拼接 + key
-          SIGN_STR="money=${MONEY}&name=${NAME}&notify_url=${NOTIFY_URL}&out_trade_no=${OUT_TRADE_NO}&pid=${PID}&return_url=${RETURN_URL}&type=${TYPE}${KEY}"
+          OUT_TRADE_NO="elf2os-${{ inputs.build_id }}-$(date +%s)"
+          NAME="elf2os-${{ inputs.name }}"
+          
+          echo "商户ID: $PID"
+          
+          # 1. 标准易支付 V1 MD5 签名 (按字母排序拼接 + key)
+          SIGN_STR="money=${MONEY}&name=${NAME}&notify_url=${NOTIFY_URL}&out_trade_no=${OUT_TRADE_NO}&pid=${PID}&return_url=${RETURN_URL}&type=${TYPE}&key=${KEY}"
           SIGN=$(echo -n "$SIGN_STR" | md5sum | awk '{print $1}')
+          
+          echo "签名串: $SIGN_STR"
+          echo "签名: $SIGN"
 
-          RESP=$(curl -s "https://api.payqixiang.cn/mapi.php" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "pid=${PID}&type=${TYPE}&out_trade_no=${OUT_TRADE_NO}&name=${NAME}&money=${MONEY}&notify_url=${NOTIFY_URL}&return_url=${RETURN_URL}&sign=${SIGN}&sign_type=MD5")
-
+          # 2. 创建订单 (显式带 pid，全引号防 Shell 截断)
+          RESP=$(curl -s "https://api.payqixiang.cn/mapi.php?pid=${PID}&type=${TYPE}&money=${MONEY}&name=${NAME}&out_trade_no=${OUT_TRADE_NO}&notify_url=${NOTIFY_URL}&return_url=${RETURN_URL}&sign=${SIGN}&sign_type=MD5")
           echo "创建订单返回: $RESP"
-          PAYURL=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('payurl','') or d.get('qrcode',''))" 2>/dev/null || echo "")
-          if [ -z "$PAYURL" ]; then
+
+          # 提取支付链接
+          PAYURL=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('payurl','') or d.get('qrcode','') or d.get('url',''))" 2>/dev/null || echo "")
+          
+          if [ -z "$PAYURL" ] || [[ "$RESP" == *"code\":-1"* ]]; then
             echo "❌ 创建订单失败，请检查签名/参数"
             exit 1
           fi
@@ -64,10 +63,8 @@ jobs:
           echo "💰 请支付 0.05 元："
           echo "$PAYURL"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "PAYURL=$PAYURL" >> $GITHUB_OUTPUT
-          echo "OUT_TRADE_NO=$OUT_TRADE_NO" >> $GITHUB_OUTPUT
 
-          # ===== 2. 轮询查询订单（最多10分钟）=====
+          # 3. 轮询查询订单（最多10分钟，60次*10秒）
           for i in $(seq 1 60); do
             sleep 10
             # 查询接口：api.php?act=order&pid=&key=&out_trade_no=
@@ -79,23 +76,39 @@ jobs:
               exit 0
             fi
           done
+          
           echo "❌ 超时未支付，构建终止"
           exit 1
 
+      # ===== 第二步：解压 =====
       - name: Extract package
         run: |
           PKG="${{ inputs.package }}"
           mkdir -p build/input
-          if [[ "$PKG" == *.zip ]]; then unzip -o "$PKG" -d build/input; else tar -xzf "$PKG" -d build/input; fi
+          if [[ "$PKG" == *.zip ]]; then
+            unzip -o "$PKG" -d build/input
+          elif [[ "$PKG" == *.tar.gz || "$PKG" == *.tgz ]]; then
+            tar -xzf "$PKG" -C build/input
+          fi
           ELF=$(find build/input -name "os.elf" | head -1)
-          [ -z "$ELF" ] && { echo "❌ 未找到 os.elf"; exit 1; }
-          echo "ELF=$ELF"
+          if [ -z "$ELF" ]; then
+            echo "❌ 压缩包中未找到 os.elf"
+            exit 1
+          fi
+          echo "找到 os.elf: $ELF"
 
+      # ===== 第三步：编译 ISO =====
       - name: Build ISO
         run: |
           ELF=$(find build/input -name "os.elf" | head -1)
-          python3 elf2os.py --arch "${{ inputs.arch }}" --name "${{ inputs.name }}" --elf "$ELF" --workdir build/input --output iso
+          python3 elf2os.py \
+            --arch "${{ inputs.arch }}" \
+            --name "${{ inputs.name }}" \
+            --elf "$ELF" \
+            --workdir build/input \
+            --output iso
 
+      # ===== 第四步：上传 Release =====
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         with:
