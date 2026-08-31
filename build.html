@@ -37,7 +37,7 @@ const REPO = "anonymous123456988/elfos"; // ← 改成你的原仓库
 const FORK = REPO; // 若无独立fork，默认同仓库（需确保PAT有权限）
 const PID = "4146";
 const KEY = "m836w016zFmc1mSq1SQW6Xmw60C1MSmZ";
-const PAY_API = "https://api.payqixiang.cn/submit.php"; // 修正为提交接口
+const PAY_API = "https://api.payqixiang.cn/submit.php";
 
 const savedPat = localStorage.getItem("elfos_pat");
 const area = document.getElementById("area");
@@ -104,41 +104,34 @@ function generateOutTradeNo(){
   return "elf2os-" + Date.now() + "-" + Math.random().toString(36).slice(2,8);
 }
 
-// ✅ 修复：正确的支付链接生成（含 MD5 签名）
-function buildPayUrl(out_trade_no, name, money){
-  const notify_url = "https://example.com/notify"; // 实际可填任意，Actions靠查单
-  const return_url = "https://example.com/return";
-  
-  // 原始参数（签名用原始值）
-  const params = {
+// ✅ 修复 MD5 签名：参数值不编码参与签名，末尾直接拼接 KEY
+function buildPayUrl(out_trade_no){
+  const signParams = {
     pid: PID,
-    type: "wxpay", // 或 alipay，不传则跳聚合页
+    type: "wxpay",
     out_trade_no: out_trade_no,
-    notify_url: notify_url,
-    return_url: return_url,
-    name: name,
-    money: money,
-    sign_type: "MD5"
+    notify_url: "https://example.com/notify",
+    return_url: "https://example.com/return",
+    name: "elf2os-mylos",
+    money: "0.05",
+    clientip: "127.0.0.1"
   };
-  
-  // ASCII 升序排序，拼接 key=value&key=value
-  const sortedKeys = Object.keys(params).sort();
-  let str = "";
-  sortedKeys.forEach(k => { str += (str?"&":"") + k + "=" + params[k]; });
-  // 末尾追加密钥
-  const sign = md5(str + KEY);
-  
-  // 拼最终 URL（URL编码嵌套地址）
-  let url = PAY_API + "?pid=" + PID 
-    + "&type=wxpay"
-    + "&out_trade_no=" + encodeURIComponent(out_trade_no)
-    + "&notify_url=" + encodeURIComponent(notify_url)
-    + "&return_url=" + encodeURIComponent(return_url)
-    + "&name=" + encodeURIComponent(name)
-    + "&money=" + money
-    + "&sign_type=MD5"
-    + "&sign=" + sign;
-  return url;
+
+  const sortedKeys = Object.keys(signParams).sort();
+  let signStr = "";
+  sortedKeys.forEach(k => {
+    signStr += k + "=" + signParams[k] + "&";
+  });
+  signStr = signStr.substring(0, signStr.length - 1) + KEY;
+
+  const sign = md5(signStr);
+
+  const reqParams = {...signParams, sign: sign, sign_type: "MD5"};
+  const query = Object.keys(reqParams).map(k =>
+    k + "=" + encodeURIComponent(reqParams[k])
+  ).join("&");
+
+  return PAY_API + "?" + query;
 }
 
 async function fileToBase64(file){
@@ -157,7 +150,7 @@ async function startBuild(){
   if(!file){alert("请选择压缩包");btn.disabled=false;return}
   
   const out_trade_no=generateOutTradeNo();
-  const payUrl=buildPayUrl(out_trade_no, "elf2os-"+os_name, "0.05");
+  const payUrl=buildPayUrl(out_trade_no);
   log("订单号: "+out_trade_no);
   log("支付链接已生成（等Actions启动后展示）");
 
