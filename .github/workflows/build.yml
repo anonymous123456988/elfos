@@ -17,6 +17,9 @@ on:
       package:
         description: '压缩包路径（仓库内相对路径）'
         required: true
+      out_trade_no:
+        description: '商户订单号（网页提前创建）'
+        required: true
 
 jobs:
   build:
@@ -26,84 +29,34 @@ jobs:
       - uses: actions/checkout@v4
 
       # ============================================================
-      # 第一步：创建订单 → 打印支付链接 → 轮询等支付
+      # 等待支付（订单已由网页提前创建，支付方式固定支付宝）
       # ============================================================
-      - name: Create order and wait for payment
+      - name: 等待支付
         run: |
           set -e
-
           PID="4146"
           KEY="m836w016zFmc1mSq1SQW6Xmw60C1MSmZ"
-          MONEY="0.05"
-          TYPE="wxpay"
-          NOTIFY="https://example.com/notify"
-          RETURN="https://example.com/return"
-          OUT_TRADE_NO="elf2os-${{ inputs.build_id }}-$(date +%s)"
-          NAME="elf2os-${{ inputs.name }}"
+          OUT_TRADE_NO="${{ inputs.out_trade_no }}"
 
-          # 获取公网 IP
-          CLIENT_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
-          echo "PID=$PID"
-          echo "clientip=$CLIENT_IP"
+          echo "订单号: $OUT_TRADE_NO"
+          echo "开始轮询支付状态（最多10分钟）..."
 
-          # MD5 签名（ASCII 升序，末尾直接加密钥，不含 sign/sign_type/空值）
-          SIGN=$(python3 -c "
-          import hashlib,sys
-          p={'pid':sys.argv[1],'type':sys.argv[2],'money':sys.argv[3],'name':sys.argv[4],'out_trade_no':sys.argv[5],'notify_url':sys.argv[6],'return_url':sys.argv[7],'clientip':sys.argv[8]}
-          s='&'.join([k+'='+p[k] for k in sorted(p)])+sys.argv[9]
-          print(hashlib.md5(s.encode()).hexdigest())
-          " "$PID" "$TYPE" "$MONEY" "$NAME" "$OUT_TRADE_NO" "$NOTIFY" "$RETURN" "$CLIENT_IP" "$KEY")
-          echo "sign=$SIGN"
-
-          # POST 创建订单
-          RESP=$(curl -s -X POST "https://api.payqixiang.cn/mapi.php" \
-            --data-urlencode "pid=$PID" \
-            --data-urlencode "type=$TYPE" \
-            --data-urlencode "money=$MONEY" \
-            --data-urlencode "name=$NAME" \
-            --data-urlencode "out_trade_no=$OUT_TRADE_NO" \
-            --data-urlencode "notify_url=$NOTIFY" \
-            --data-urlencode "return_url=$RETURN" \
-            --data-urlencode "clientip=$CLIENT_IP" \
-            --data-urlencode "sign=$SIGN" \
-            --data-urlencode "sign_type=MD5")
-
-          echo "RESP=$RESP"
-
-          # 提取 payurl（code==1 才成功）
-          PAYURL=$(python3 -c "
-          import json,sys
-          d=json.loads(sys.stdin.read())
-          print(d['payurl'] if d.get('code')==1 else '')
-          " <<< "$RESP")
-
-          if [ -z "$PAYURL" ]; then
-            echo "❌ 创建订单失败"
-            exit 1
-          fi
-
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "💰 请支付 0.05 元："
-          echo "$PAYURL"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-          # 轮询等支付（最多 10 分钟）
           for i in $(seq 1 60); do
             sleep 10
             Q=$(curl -s "https://api.payqixiang.cn/api.php?act=order&pid=$PID&key=$KEY&out_trade_no=$OUT_TRADE_NO")
             STATUS=$(python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('status','0'))" <<< "$Q")
             echo "  轮询 ${i}: status=$STATUS"
             if [ "$STATUS" = "1" ]; then
-              echo "✅ 支付成功！"
+              echo "✅ 支付成功，开始构建！"
               exit 0
             fi
           done
 
-          echo "❌ 超时未支付"
+          echo "❌ 超时未支付，构建终止"
           exit 1
 
       # ============================================================
-      # 第二步：解压
+      # 解压
       # ============================================================
       - name: Extract package
         run: |
@@ -125,25 +78,25 @@ jobs:
           echo "找到 os.elf: $ELF"
 
       # ============================================================
-      # 第三步：编译 ISO
+      # 编译 ISO
       # ============================================================
       - name: Build ISO
         run: |
           ELF=$(find build/input -name "os.elf" | head -1)
+          mkdir -p build/output
           python3 elf2os.py \
             --arch "${{ inputs.arch }}" \
-            --name "${{ inputs.name }}" \
+            --名称 "${{ inputs.name }}" \
             --elf "$ELF" \
-            --workdir build/input \
-            --output iso
+            --输出 "build/output/${{ inputs.name }}.iso"
 
       # ============================================================
-      # 第四步：上传 Release
+      # 上传 Release
       # ============================================================
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "build-${{ inputs.build_id }}"
-          files: "*.iso"
+          files: "build/output/*.iso"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
