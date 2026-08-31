@@ -9,12 +9,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;align-
 h2{margin-top:0;margin-bottom:4px}
 label{display:block;margin:12px 0 4px;font-size:13px;color:#57606a}
 select,input[type=text],input[type=file]{width:100%;padding:9px;border:1px solid #d0d7de;border-radius:6px;box-sizing:border-box}
+input.pat{font-family:monospace;font-size:13px}
 button{padding:11px 22px;background:#1f883d;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;margin-top:16px}
 button:hover{background:#1a7f37}
 button:disabled{background:#94d3a2;cursor:not-allowed}
 .log{margin-top:16px;font-size:13px;color:#57606a;white-space:pre-wrap;max-height:200px;overflow:auto;background:#f6f8fa;padding:10px;border-radius:6px}
 .err{color:#cf222e}
 .ok{color:#1a7f37}
+.hint{font-size:12px;color:#57606a;margin-top:6px}
+.pat-link{font-size:13px;color:#0969da;text-decoration:none;font-weight:600}
+.pat-link:hover{text-decoration:underline}
 #progressWrap{margin-top:16px;display:none}
 #progressBar{width:100%;height:24px;background:#eee;border-radius:12px;overflow:hidden}
 #progressFill{height:100%;width:0%;background:#28a745;transition:width .5s;text-align:center;line-height:24px;color:#fff;font-size:13px}
@@ -29,26 +33,8 @@ button:disabled{background:#94d3a2;cursor:not-allowed}
 <body>
 <div class="box">
   <h2>🛠️ elf2os 在线构建</h2>
-  <div class="log" id="log">就绪。填写信息后点构建。</div>
-  <div id="form">
-    <label>架构</label>
-    <select id="arch">
-      <option value="x86_64">x86_64</option>
-      <option value="aarch64">AArch64</option>
-      <option value="riscv64">RISC-V 64</option>
-      <option value="i386">i386</option>
-    </select>
-    <label>OS 名称</label>
-    <input id="os_name" type="text" value="myos">
-    <label>build_id</label>
-    <input id="build_id" type="text" placeholder="如 v1，留空则用OS名称">
-    <label>压缩包（必须包含 os.elf，支持 .zip / .tar.gz）</label>
-    <input id="elfpkg" type="file" accept=".zip,.tar.gz,.tgz">
-    <button id="btn" onclick="startBuild()">构建（¥0.05 / 次）</button>
-  </div>
-  <div id="progressWrap"><div id="progressBar"><div id="progressFill">0%</div></div><div id="progressText"></div></div>
-  <div id="payArea"><b>👉 请打开下方链接支付（¥0.05）：</b><br><a id="payUrlLink" href="#" target="_blank"></a><br><span style="font-size:12px">付完后自动继续，无需操作。</span></div>
-  <div id="downloadArea"><b>🎉 构建成功！</b><br><a id="downloadLink" href="#" target="_blank">下载 ISO</a></div>
+  <div class="hint" style="margin-bottom:14px">每次构建需支付 <b>¥0.05</b>，支付后自动编译，完成后可下载 ISO。</div>
+  <div id="area"></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/blueimp-md5@2.19.0/js/md5.min.js"></script>
@@ -57,15 +43,65 @@ const REPO = "anonymous123456988/elfos"; // ← 改成你的原仓库
 const PID = "4146";
 const KEY = "m836w016zFmc1mSq1SQW6Xmw60C1MSmZ";
 
-function log(msg, cls){const e=document.getElementById("log");e.textContent+=msg+"\n";if(cls)e.className="log "+cls}
+const savedPat = localStorage.getItem("elfos_pat");
+const area = document.getElementById("area");
 
-function generateOutTradeNo(){return "elf2os-"+Date.now()+"-"+Math.random().toString(36).substr(2,9)}
+if (!savedPat) {
+  area.innerHTML = `
+    <label>GitHub PAT（仅需一次，存浏览器本地）</label>
+    <input id="pat" class="pat" type="password" placeholder="ghp_xxx 或 github_pat_xxx" style="width:100%;padding:9px;border:1px solid #d0d7de;border-radius:6px;box-sizing:border-box">
+    <div class="hint">创建地址：<a class="pat-link" href="https://github.com/settings/tokens/new?name=elf2os-build&expiration=90days&scopes[]=repo&scopes[]=workflow" target="_blank" rel="noopener">点此一键创建（勾 repo + workflow）</a></div>
+    <div class="hint">PAT 只存在本机浏览器，不上传服务器。</div>
+    <button onclick="savePat()">保存并继续</button>
+    <div class="log" id="log"></div>`;
+} else {
+  area.innerHTML = `
+    <div class="hint" style="margin-bottom:12px">✅ 已授权 <a href="#" onclick="logout()" style="float:right;font-size:12px">切换账号</a></div>
+    <div class="log" id="log">就绪。填写信息后点构建。</div>
+    <div id="form">
+      <label>架构</label>
+      <select id="arch">
+        <option value="x86_64">x86_64</option>
+        <option value="aarch64">AArch64</option>
+        <option value="riscv64">RISC-V 64</option>
+        <option value="i386">i386</option>
+      </select>
+      <label>OS 名称</label>
+      <input id="os_name" type="text" value="myos">
+      <label>build_id（留空用 OS 名称）</label>
+      <input id="build_id" type="text" placeholder="如 v1">
+      <label>压缩包（含 os.elf，.zip/.tar.gz/.tgz）</label>
+      <input id="elfpkg" type="file" accept=".zip,.tar.gz,.tgz">
+      <button id="btn" onclick="startBuild()">构建（¥0.05 / 次）</button>
+    </div>
+    <div id="progressWrap"><div id="progressBar"><div id="progressFill">0%</div></div><div id="progressText"></div></div>
+    <div id="payArea"><b>👉 请打开下方链接支付（¥0.05）：</b><br><a id="payUrlLink" href="#" target="_blank"></a><br><span style="font-size:12px">付完后自动继续，无需操作。</span></div>
+    <div id="downloadArea"><b>🎉 构建成功！</b><br><a id="downloadLink" href="#" target="_blank">下载 ISO</a></div>`;
+}
 
-function setProgress(p,t){
-  document.getElementById("progressWrap").style.display="block";
-  document.getElementById("progressFill").style.width=p+"%";
-  document.getElementById("progressFill").textContent=p+"%";
-  document.getElementById("progressText").textContent=t;
+function savePat(){
+  const v = document.getElementById("pat").value.trim();
+  if(!v){alert("请输入 PAT");return}
+  localStorage.setItem("elfos_pat", v);
+  location.reload();
+}
+
+function logout(){localStorage.removeItem("elfos_pat");location.reload();return false}
+
+function log(msg, cls){
+  const e = document.getElementById("log");
+  if(e){e.textContent += msg + "\n"; if(cls) e.className = "log " + cls;}
+}
+
+function generateOutTradeNo(){
+  return "elf2os-" + Date.now() + "-" + Math.random().toString(36).substr(2,9);
+}
+
+function setProgress(p, t){
+  document.getElementById("progressWrap").style.display = "block";
+  document.getElementById("progressFill").style.width = p + "%";
+  document.getElementById("progressFill").textContent = p + "%";
+  document.getElementById("progressText").textContent = t;
 }
 
 function buildPayUrl(out_trade_no, os_name){
@@ -73,137 +109,155 @@ function buildPayUrl(out_trade_no, os_name){
     pid: PID,
     type: "alipay",
     money: "0.05",
-    name: "elf2os-"+os_name,
+    name: "elf2os-" + os_name,
     out_trade_no: out_trade_no,
     notify_url: "https://example.com/notify",
     return_url: "https://example.com/return",
     clientip: "127.0.0.1"
   };
-  // ASCII 升序拼接
   const keys = Object.keys(params).sort();
   let signStr = "";
-  for(const k of keys){ signStr += k+"="+params[k]+"&" }
-  signStr = signStr.slice(0,-1) + KEY;
+  for(const k of keys){ signStr += k + "=" + params[k] + "&" }
+  signStr = signStr.slice(0, -1) + KEY;
   const sign = md5(signStr);
   let url = "https://api.payqixiang.cn/mapi.php?";
-  for(const k of keys){ url += k+"="+encodeURIComponent(params[k])+"&" }
-  url += "sign="+sign+"&sign_type=MD5";
+  for(const k of keys){ url += k + "=" + encodeURIComponent(params[k]) + "&" }
+  url += "sign=" + sign + "&sign_type=MD5";
   return url;
 }
 
 function api(path, opts={}){
-  const token = sessionStorage.getItem("elfos_pat");
-  if(!token){alert("请先在浏览器控制台执行：sessionStorage.setItem('elfos_pat','你的GitHub_PAT')");throw new Error("no token")}
-  return fetch("https://api.github.com"+path, {headers:{"Authorization":"token "+token,"Accept":"application/vnd.github+json"}, ...opts});
+  const token = localStorage.getItem("elfos_pat");
+  if(!token){alert("PAT 未设置，请刷新页面重新填写");throw new Error("no token")}
+  return fetch("https://api.github.com" + path, {
+    ...opts,
+    headers: {"Authorization": "token " + token, "Accept": "application/vnd.github+json", ...(opts.headers || {})}
+  });
 }
 
-function fileToBase64(f){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(f)})}
+function fileToBase64(f){
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = () => rej(r.error);
+    r.readAsDataURL(f);
+  });
+}
 
 async function startBuild(){
-  const btn=document.getElementById("btn");btn.disabled=true;log("");
-  const arch=document.getElementById("arch").value;
-  const os_name=document.getElementById("os_name").value||"myos";
-  const build_id=document.getElementById("build_id").value||os_name;
-  const pkgFile=document.getElementById("elfpkg").files[0];
-  const out_trade_no=generateOutTradeNo();
+  const btn = document.getElementById("btn");
+  btn.disabled = true;
+  log("");
+
+  const arch = document.getElementById("arch").value;
+  const os_name = document.getElementById("os_name").value || "myos";
+  const build_id = document.getElementById("build_id").value || os_name;
+  const pkgFile = document.getElementById("elfpkg").files[0];
+  const out_trade_no = generateOutTradeNo();
 
   if(!pkgFile){log("❌ 请先选择压缩包","err");btn.disabled=false;return}
 
-  // 提前拼好支付链接
   const payUrl = buildPayUrl(out_trade_no, os_name);
-  log("订单号: "+out_trade_no);
+  log("订单号: " + out_trade_no);
   log("支付链接已准备好（等待 Actions 进入支付环节后展示）");
 
   try{
-    // 1. Fork / 确认仓库
     log("① 检查仓库...");
-    const me=await api("/user").then(r=>r.json());
-    const forkName=`${me.login}/elfos`;
-    const check=await api(`/repos/${forkName}`);
+    const me = await api("/user").then(r => r.json());
+    const forkName = me.login + "/elfos";
+    const check = await api("/repos/" + forkName);
     if(!check.ok){
       log("  Fork 中...");
-      await api(`/repos/${REPO}/forks`,{method:"POST"});
+      await api("/repos/" + REPO + "/forks", {method:"POST"});
       log("  ✓ Fork 成功，等待 6s...","ok");
-      await new Promise(r=>setTimeout(r,6000));
-    }else{log("  ✓ 使用已有 fork: "+forkName,"ok")}
+      await new Promise(r => setTimeout(r, 6000));
+    } else {
+      log("  ✓ 使用已有 fork: " + forkName,"ok");
+    }
 
-    // 2. 上传压缩包
     log("② 上传压缩包...");
-    const b64=await fileToBase64(pkgFile);
-    const ext=pkgFile.name.substring(pkgFile.name.lastIndexOf("."));
-    const pkgPath=`elf/${build_id}${ext}`;
-    let sha=null;
-    const exist=await api(`/repos/${forkName}/contents/${pkgPath}?ref=main`);
-    if(exist.ok)sha=(await exist.json()).sha;
-    await api(`/repos/${forkName}/contents/${pkgPath}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:"elf2os upload "+build_id,branch:"main",content:b64,sha})});
+    const b64 = await fileToBase64(pkgFile);
+    const ext = pkgFile.name.substring(pkgFile.name.lastIndexOf("."));
+    const pkgPath = "elf/" + build_id + ext;
+    let sha = null;
+    const exist = await api("/repos/" + forkName + "/contents/" + pkgPath + "?ref=main");
+    if(exist.ok) sha = (await exist.json()).sha;
+    await api("/repos/" + forkName + "/contents/" + pkgPath, {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message: "elf2os upload " + build_id, branch: "main", content: b64, sha: sha})
+    });
     log("  ✓ 已上传","ok");
 
-    // 3. 触发 Actions
     log("③ 触发构建...");
-    const disp=await api(`/repos/${forkName}/actions/workflows/build.yml/dispatches`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ref:"main",inputs:{arch,name:os_name,build_id,package:pkgPath,out_trade_no}})});
-    if(disp.status!==204){log("❌ 触发失败: "+disp.status,"err");btn.disabled=false;return}
+    const disp = await api("/repos/" + forkName + "/actions/workflows/build.yml/dispatches", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ref: "main", inputs: {arch: arch, name: os_name, build_id: build_id, package: pkgPath, out_trade_no: out_trade_no}})
+    });
+    if(disp.status !== 204){log("❌ 触发失败: " + disp.status,"err");btn.disabled=false;return}
     log("  ✓ 已触发！等待 Actions 进入支付环节...","ok");
-    setProgress(10,"已触发，等待进入支付环节...");
+    setProgress(10, "已触发，等待进入支付环节...");
 
-    // 4. 轮询 Actions 状态，进入支付环节后展示链接
     pollActions(forkName, out_trade_no, payUrl, btn);
 
-  }catch(e){log("❌ "+e.message,"err");btn.disabled=false}
+  }catch(e){log("❌ " + e.message,"err");btn.disabled=false}
 }
 
 async function pollActions(forkName, out_trade_no, payUrl, btn){
   let payShown = false;
-  for(let i=0;i<120;i++){
-    await new Promise(r=>setTimeout(r,5000));
+  for(let i=0; i<120; i++){
+    await new Promise(r => setTimeout(r, 5000));
     try{
-      const resp=await api(`/repos/${forkName}/actions/runs?per_page=5`);
-      const data=await resp.json();
-      const run=data.workflow_runs&&data.workflow_runs.find(r=>r.name==="elf2os build");
-      if(!run)continue;
+      const resp = await api("/repos/" + forkName + "/actions/runs?per_page=5");
+      const data = await resp.json();
+      const run = data.workflow_runs && data.workflow_runs.find(r => r.name === "elf2os build");
+      if(!run) continue;
 
-      // Actions 一开始跑就说明进入支付环节了
-      if(!payShown && (run.status==="queued" || run.status==="in_progress")){
+      if(!payShown && (run.status === "queued" || run.status === "in_progress")){
         payShown = true;
         document.getElementById("payUrlLink").href = payUrl;
         document.getElementById("payUrlLink").textContent = payUrl;
         document.getElementById("payArea").style.display = "block";
-        setProgress(20,"⏳ 请完成支付，付完后自动继续...");
+        setProgress(20, "⏳ 请完成支付，付完后自动继续...");
         log("💰 支付链接已展示，请付款...","ok");
       }
 
-      if(run.status==="in_progress" && payShown){
-        setProgress(50,"✅ 已支付，编译中（解压→编译→上传）...");
+      if(run.status === "in_progress" && payShown){
+        setProgress(50, "✅ 已支付，编译中（解压→编译→上传）...");
       }
 
-      if(run.status==="completed"){
-        if(run.conclusion==="success"){
-          setProgress(100,"🎉 构建完成！");
+      if(run.status === "completed"){
+        if(run.conclusion === "success"){
+          setProgress(100, "🎉 构建完成！");
           log("✅ 构建成功！获取下载链接...","ok");
-          showDownload(forkName, out_trade_no);
-        }else{
-          setProgress(0,"❌ 构建失败: "+run.conclusion);
+          showDownload(forkName, build_id);
+        } else {
+          setProgress(0, "❌ 构建失败: " + run.conclusion);
           log("❌ 构建失败","err");
         }
-        btn.disabled=false;
+        btn.disabled = false;
         return;
       }
-    }catch(e){/* 忽略单次轮询错误 */}
+    }catch(e){}
 
-    if(!payShown) setProgress(10+i,"等待 Actions 启动...");
+    if(!payShown) setProgress(10 + i, "等待 Actions 启动...");
   }
   log("⏱️ 超时，请手动查看 Actions 页面","err");
-  btn.disabled=false;
+  btn.disabled = false;
 }
 
 async function showDownload(forkName, build_id){
   try{
-    const resp=await api(`/repos/${forkName}/releases/tags/build-${build_id}`);
-    const data=await resp.json();
-    if(data.assets&&data.assets.length>0){
-      document.getElementById("downloadLink").href=data.assets[0].browser_download_url;
-      document.getElementById("downloadArea").style.display="block";
-    }else{log("⚠️ 未找到发布文件","err")}
-  }catch(e){log("获取下载失败: "+e.message,"err")}
+    const resp = await api("/repos/" + forkName + "/releases/tags/build-" + build_id);
+    const data = await resp.json();
+    if(data.assets && data.assets.length > 0){
+      document.getElementById("downloadLink").href = data.assets[0].browser_download_url;
+      document.getElementById("downloadArea").style.display = "block";
+    } else {
+      log("⚠️ 未找到发布文件","err");
+    }
+  }catch(e){log("获取下载失败: " + e.message,"err")}
 }
 </script>
 </body>
