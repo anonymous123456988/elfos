@@ -4,301 +4,208 @@
 <meta charset="UTF-8">
 <title>elf2os 在线构建</title>
 <style>
-  body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; }
-  label { display: block; margin-top: 12px; }
-  input[type="text"], input[type="password"], select { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
-  input[type="file"] { margin-top: 8px; }
-  button { background: #007bff; color: #fff; border: none; cursor: pointer; margin-top: 16px; padding: 10px 20px; border-radius: 4px; }
-  button:hover { background: #0056b3; }
-  button:disabled { background: #aaa; cursor: not-allowed; }
-  #payurl { margin-top: 16px; padding: 12px; background: #f0f0f0; word-break: break-all; }
-  #status { margin-top: 12px; color: #333; }
-  #progressWrap { margin-top: 16px; display: none; }
-  #progressBar { width: 100%; height: 24px; background: #eee; border-radius: 12px; overflow: hidden; }
-  #progressFill { height: 100%; width: 0%; background: #28a745; transition: width 0.5s; text-align: center; line-height: 24px; color: #fff; font-size: 13px; }
-  #progressText { margin-top: 6px; font-size: 14px; color: #555; }
-  #downloadArea { margin-top: 16px; display: none; padding: 16px; background: #d4edda; border-radius: 8px; }
-  #downloadArea a { display: inline-block; padding: 10px 20px; background: #28a745; color: #fff; text-decoration: none; border-radius: 6px; }
-  #downloadArea a:hover { background: #1e7e34; }
-  .section { border: 1px solid #ddd; padding: 12px; border-radius: 8px; margin-top: 16px; }
-  .section h3 { margin: 0 0 8px 0; font-size: 16px; }
+body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f6f8fa;margin:0;padding:16px}
+.box{background:#fff;padding:32px;border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.08);max-width:540px;width:100%}
+h2{margin-top:0;margin-bottom:4px}
+label{display:block;margin:12px 0 4px;font-size:13px;color:#57606a}
+select,input[type=text],input[type=file]{width:100%;padding:9px;border:1px solid #d0d7de;border-radius:6px;box-sizing:border-box}
+input.pat{font-family:monospace;font-size:13px}
+button{padding:11px 22px;background:#1f883d;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;margin-top:16px}
+button:hover{background:#1a7f37}
+button:disabled{background:#94d3a2;cursor:not-allowed}
+.log{margin-top:16px;font-size:13px;color:#57606a;white-space:pre-wrap;max-height:280px;overflow:auto;background:#f6f8fa;padding:10px;border-radius:6px}
+.err{color:#cf222e}
+.ok{color:#1a7f37}
+.hint{font-size:12px;color:#57606a;margin-top:6px}
+.pat-link{font-size:13px;color:#0969da;text-decoration:none;font-weight:600}
+.pat-link:hover{text-decoration:underline}
+a.acts{color:#0969da;font-weight:600}
 </style>
 </head>
 <body>
-
-<h2>elf2os 在线构建</h2>
-
-<div class="section">
-  <h3>1. GitHub 配置</h3>
-  <label>仓库（用户名/仓库名）<input id="repo" placeholder="如: myuser/elf2os"></label>
-  <label>GitHub PAT（需 workflow + repo 权限）<input id="token" type="password" placeholder="ghp_xxxxxxxxxxxx"></label>
+<div class="box">
+  <h2>🛠️ elf2os 在线构建</h2>
+  <div class="hint" style="margin-bottom:14px">每次构建需支付 <b>¥0.05</b>，支付后在 Actions 页面自动继续编译。</div>
+  <div id="area"></div>
 </div>
+<script>
+const REPO = "anonymous123456988/elfos";
 
-<div class="section">
-  <h3>2. 构建参数</h3>
-  <label>架构
+const savedPat = localStorage.getItem("elfos_pat");
+const area = document.getElementById("area");
+
+if (!savedPat) {
+  area.innerHTML = `
+    <label>GitHub Classic PAT（仅需一次）</label>
+    <input id="pat" class="pat" type="password" placeholder="ghp_xxx 或 github_pat_xxx">
+    <div class="hint">用你自己的账号创建，勾 <b>repo</b> + <b>workflow</b> 权限。PAT 仅存浏览器本地，不会上传。</div>
+    <div class="hint">还没有？<a class="pat-link" href="https://github.com/settings/tokens/new?name=elf2os-build&expiration=90days&scopes[]=repo&scopes[]=workflow&target=personal" target="_blank" rel="noopener">点击一键创建 →</a></div>
+    <button onclick="savePat()">保存并继续</button>
+    <div class="log" id="log"></div>`;
+} else {
+  area.innerHTML = `
+    <div class="hint" style="margin-bottom:12px">✅ 已授权 <a href="#" onclick="logout()" style="float:right;font-size:12px">切换账号</a></div>
+    <label>架构</label>
     <select id="arch">
       <option value="x86_64">x86_64</option>
-      <option value="aarch64">aarch64</option>
-      <option value="riscv64">riscv64</option>
+      <option value="aarch64">AArch64 (ARM64)</option>
+      <option value="riscv64">RISC-V 64</option>
+      <option value="i386">i386 (x86 32-bit)</option>
     </select>
-  </label>
-  <label>OS名称 <input id="name" value="myos"></label>
-  <label>构建ID <input id="build_id" value="v1"></label>
-</div>
-
-<div class="section">
-  <h3>3. 上传压缩包（内含 os.elf）</h3>
-  <input type="file" id="elfFile" accept=".zip,.tar.gz,.tgz">
-  <div id="uploadStatus" style="margin-top:8px;font-size:14px;color:#666;"></div>
-</div>
-
-<div class="section">
-  <h3>4. 支付</h3>
-  <div id="status">页面加载中，正在生成订单...</div>
-  <div id="payurl"></div>
-</div>
-
-<button onclick="uploadAndBuild()" id="buildBtn" disabled>上传并开始构建</button>
-
-<div id="progressWrap">
-  <div id="progressBar"><div id="progressFill">0%</div></div>
-  <div id="progressText">等待触发...</div>
-</div>
-
-<div id="downloadArea">
-  <div style="margin-bottom:8px;">✅ 构建成功！点击下载：</div>
-  <a id="downloadLink" href="#" target="_blank">下载 ISO</a>
-</div>
-
-<script>
-let currentOutTradeNo = '';
-let currentPayurl = '';
-let pollTimer = null;
-
-const PID = '4146';
-const KEY = 'm836w016zFmc1mSq1SQW6Xmw60C1MSmZ';
-
-// MD5
-async function md5(str) {
-  const buf = new TextEncoder().encode(str);
-  const digest = await crypto.subtle.digest('MD5', buf);
-  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
+    <label>OS 名称</label>
+    <input id="os_name" type="text" value="myos">
+    <label>build_id（对应压缩包内文件名前缀，留空则用 OS 名称）</label>
+    <input id="build_id" type="text" placeholder="如 v1">
+    <label>压缩包（必须包含 os.elf，支持 .zip / .tar.gz / .tgz）</label>
+    <input id="elfpkg" type="file" accept=".zip,.tar.gz,.tgz">
+    <button id="btn" onclick="startBuild()">构建（¥0.05 / 次）</button>
+    <div class="log" id="log">就绪。填写后点构建。</div>`;
 }
 
-// ── 页面加载：自动生成订单号 + 创建订单 ──
-window.addEventListener('DOMContentLoaded', async () => {
-  await autoCreateOrder();
-});
+function savePat() {
+  const v = document.getElementById("pat").value.trim();
+  if (!v) return;
+  localStorage.setItem("elfos_pat", v);
+  location.reload();
+}
+function logout() {
+  localStorage.removeItem("elfos_pat");
+  location.reload();
+  return false;
+}
 
-async function autoCreateOrder() {
-  const outTradeNo = 'elf2os-' + Date.now() + '-' + Math.random().toString(36).substr(2, 8);
-  currentOutTradeNo = outTradeNo;
-
-  const name = 'elf2os-build';
-  const money = '0.05';
-  const type = 'alipay';
-  const notify = 'https://example.com/notify';
-  const ret = 'https://example.com/return';
-  const clientip = '127.0.0.1';
-
-  const params = { name, notify_url: notify, out_trade_no: outTradeNo, pid: PID, return_url: ret, type, money, clientip };
-  const sorted = Object.keys(params).sort().map(k => k + '=' + params[k]).join('&') + KEY;
-  const sign = await md5(sorted);
-
-  const body = new URLSearchParams({ ...params, sign, sign_type: 'MD5' });
-
-  try {
-    const resp = await fetch('https://api.payqixiang.cn/mapi.php', { method: 'POST', body });
-    const data = await resp.json();
-
-    if (data.code == 1 && data.payurl) {
-      currentPayurl = data.payurl;
-      document.getElementById('status').innerHTML = '✅ 订单已生成，请<a href="' + data.payurl + '" target="_blank" style="color:#007bff;">点击此处支付 0.05 元</a>（支付完成后点击下方按钮）';
-      document.getElementById('payurl').innerHTML = '<a href="' + data.payurl + '" target="_blank">' + data.payurl + '</a>';
-    } else {
-      document.getElementById('status').textContent = '❌ 自动创建订单失败: ' + (data.msg || JSON.stringify(data));
+function api(path, opts={}) {
+  return fetch("https://api.github.com" + path, {
+    ...opts,
+    headers: {
+      "Authorization": "Bearer " + localStorage.getItem("elfos_pat"),
+      "Accept": "application/vnd.github+json",
+      ...(opts.headers||{})
     }
-  } catch (e) {
-    document.getElementById('status').textContent = '❌ 网络错误: ' + e.message;
-  }
+  });
 }
 
-// ── 上传文件到 GitHub 仓库 ──
-async function uploadFile(token, repo, fileInput, buildId) {
-  const file = fileInput.files[0];
-  if (!file) throw new Error('请选择文件');
-
-  document.getElementById('uploadStatus').textContent = '正在上传...';
-
-  // 读取文件为 base64
-  const content = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      // 去掉 data:*/*;base64, 前缀
-      const b64 = reader.result.split(',')[1];
-      resolve(b64);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-
-  const path = 'uploads/build-' + buildId + '-' + file.name;
-
-  // 检查文件是否已存在
-  let sha = '';
-  const checkResp = await fetch(`https://api.github.com/repos/${repo}/contents/${path}`, {
-    headers: { 'Authorization': 'token ' + token, 'Accept': 'application/vnd.github+json' }
-  });
-  if (checkResp.status === 200) {
-    const d = await checkResp.json();
-    sha = d.sha; // 用于更新
-  }
-
-  // 创建/更新文件
-  const putBody = { message: 'upload ' + file.name + ' for build ' + buildId, content };
-  if (sha) putBody.sha = sha;
-
-  const putResp = await fetch(`https://api.github.com/repos/${repo}/contents/${path}`, {
-    method: 'PUT',
-    headers: { 'Authorization': 'token ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(putBody)
-  });
-
-  if (!putResp.ok) {
-    const err = await putResp.json();
-    throw new Error('上传失败: ' + (err.message || putResp.status));
-  }
-
-  document.getElementById('uploadStatus').textContent = '✅ 上传成功: ' + path;
-  return path;
+function log(msg, cls) {
+  const e = document.getElementById("log");
+  if (!e) return;
+  e.textContent += msg + "\n";
+  if (cls) e.className = "log " + cls;
 }
 
-// ── 上传并开始构建 ──
-async function uploadAndBuild() {
-  const token = document.getElementById('token').value.trim();
-  const repo = document.getElementById('repo').value.trim();
+// 随机生成订单号（纯字符串，网页不写任何 key）
+function generateOutTradeNo() {
+  const ts = Date.now();
+  const rand = Math.random().toString(36).substr(2, 8);
+  return "elf2os-" + ts + "-" + rand;
+}
 
-  if (!token || !repo) { alert('请填写仓库和 PAT'); return; }
-  if (!currentOutTradeNo) { alert('订单尚未生成，请等待'); return; }
+// FileReader 转 base64（不爆栈）
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result.split(",")[1]);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
 
-  const buildBtn = document.getElementById('buildBtn');
-  buildBtn.disabled = true;
+async function startBuild() {
+  const btn = document.getElementById("btn");
+  btn.disabled = true;
+  log("");
+
+  const arch = document.getElementById("arch").value;
+  const os_name = document.getElementById("os_name").value || "myos";
+  const build_id = document.getElementById("build_id").value || os_name;
+  const pkgFile = document.getElementById("elfpkg").files[0];
+
+  // 自动生成订单号
+  const out_trade_no = generateOutTradeNo();
+
+  if (!pkgFile) {
+    log("❌ 请先选择压缩包", "err");
+    btn.disabled = false;
+    return;
+  }
 
   try {
-    // 1. 上传文件
-    const buildId = document.getElementById('build_id').value;
-    const filePath = await uploadFile(token, repo, document.getElementById('elfFile'), buildId);
+    // 1. 确认仓库（fork 或用自己的）
+    log("① 检查仓库...");
+    let forkName = REPO;
+    const me = await api("/user").then(r => r.json());
+    const myFork = `${me.login}/elfos`;
+    const check = await api(`/repos/${myFork}`);
+    if (check.ok) {
+      forkName = myFork;
+      log("  使用已有 fork: " + forkName, "ok");
+    } else {
+      log("  Fork 中...");
+      const f = await api(`/repos/${REPO}/forks`, {method:"POST"});
+      if (!f.ok) throw new Error("Fork 失败: " + (await f.json()).message);
+      forkName = myFork;
+      log("  Fork 成功: " + forkName, "ok");
+      await new Promise(r => setTimeout(r, 6000));
+    }
 
-    // 2. 触发 Actions
-    document.getElementById('status').textContent = '正在触发构建...';
-    document.getElementById('progressWrap').style.display = 'block';
-    setProgress(10, '已上传文件，正在触发 Actions...');
-    document.getElementById('downloadArea').style.display = 'none';
+    // 2. 上传压缩包
+    log("② 上传压缩包...");
+    const b64 = await fileToBase64(pkgFile);
+    const pkgPath = `elf/${build_id}.pkg${pkgFile.name.substring(pkgFile.name.lastIndexOf("."))}`;
+    let sha = null;
+    const exist = await api(`/repos/${forkName}/contents/${pkgPath}?ref=main`);
+    if (exist.ok) sha = (await exist.json()).sha;
+    const put = await api(`/repos/${forkName}/contents/${pkgPath}`, {
+      method: "PUT",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        message: "elf2os: upload package " + build_id,
+        branch: "main",
+        content: b64,
+        sha: sha
+      })
+    });
+    if (!put.ok) throw new Error("上传失败: " + (await put.json()).message);
+    log("  ✓ 已上传: " + pkgPath, "ok");
 
-    const payload = {
-      ref: 'main',
-      inputs: {
-        arch: document.getElementById('arch').value,
-        name: document.getElementById('name').value,
-        build_id: buildId,
-        package: filePath,
-        out_trade_no: currentOutTradeNo
+    // 3. 触发 build.yml（传入 out_trade_no）
+    log("③ 触发构建（含支付验证）...");
+    log("  订单号: " + out_trade_no);
+    const disp = await api(`/repos/${forkName}/actions/workflows/build.yml/dispatches`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        ref: "main",
+        inputs: { arch, name: os_name, build_id, package: pkgPath, out_trade_no }
+      })
+    });
+    if (disp.status !== 204) throw new Error("触发失败: " + disp.status);
+    log("  ✓ 已触发！", "ok");
+
+    // 4. 等 workflow 出现，给出链接
+    log("④ 等待 Actions 启动...");
+    for (let i = 0; i < 12; i++) {
+      await new Promise(r => setTimeout(r, 5000));
+      const runs = await api(`/repos/${forkName}/actions/runs?per_page=3`).then(r => r.json());
+      const run = runs.workflow_runs && runs.workflow_runs.find(r => r.name === "elf2os build");
+      if (run) {
+        log("");
+        log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "ok");
+        log("👉 打开下方链接查看支付页面：", "ok");
+        log("");
+        area.innerHTML += `<p style="margin-top:10px"><a class="acts" href="${run.html_url}" target="_blank">${run.html_url}</a></p>`;
+        log("");
+        log("付完 0.05 元后 Actions 自动继续，ISO 将发布到 Releases。", "ok");
+        return;
       }
-    };
-
-    const resp = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/build.yml/dispatches`, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'token ' + token,
-        'Accept': 'application/vnd.github+json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (resp.status === 204) {
-      document.getElementById('status').textContent = '✅ 构建已触发！正在轮询进度...';
-      setProgress(20, '已触发，等待 Actions 调度...');
-      setTimeout(() => pollRunStatus(token, repo), 5000);
-    } else {
-      const d = await resp.json();
-      document.getElementById('status').textContent = '❌ 触发失败: ' + d.message;
-      setProgress(0, '触发失败');
-      buildBtn.disabled = false;
+      log("  等待中...");
     }
+    log("⏱️ 未检测到 workflow，请手动查看 Actions 页", "err");
+
   } catch (e) {
-    document.getElementById('status').textContent = '❌ 错误: ' + e.message;
-    setProgress(0, '出错');
-    buildBtn.disabled = false;
+    log("❌ " + e.message, "err");
+    btn.disabled = false;
   }
-}
-
-// ── 轮询 Actions 状态 ──
-async function pollRunStatus(token, repo) {
-  try {
-    const resp = await fetch(`https://api.github.com/repos/${repo}/actions/runs?per_page=1`, {
-      headers: { 'Authorization': 'token ' + token, 'Accept': 'application/vnd.github+json' }
-    });
-    const data = await resp.json();
-    if (!data.workflow_runs || data.workflow_runs.length === 0) {
-      setProgress(0, '未找到运行记录');
-      return;
-    }
-
-    const run = data.workflow_runs[0];
-    const status = run.status;
-    const conclusion = run.conclusion;
-
-    if (status === 'queued') {
-      setProgress(20, '排队中...');
-    } else if (status === 'in_progress') {
-      setProgress(50, '构建中...（等待支付 → 解压 → 编译 → 上传）');
-    } else if (status === 'completed') {
-      if (conclusion === 'success') {
-        setProgress(100, '构建完成！');
-        showDownloadLink(token, repo);
-      } else {
-        setProgress(0, '❌ 构建失败: ' + conclusion);
-        document.getElementById('status').textContent = '❌ 构建失败，请检查 Actions 日志';
-      }
-      return;
-    }
-
-    pollTimer = setTimeout(() => pollRunStatus(token, repo), 8000);
-  } catch (e) {
-    setProgress(0, '轮询出错: ' + e.message);
-  }
-}
-
-// ── 获取下载链接 ──
-async function showDownloadLink(token, repo) {
-  try {
-    const buildId = document.getElementById('build_id').value;
-    const resp = await fetch(`https://api.github.com/repos/${repo}/releases/tags/build-${buildId}`, {
-      headers: { 'Authorization': 'token ' + token, 'Accept': 'application/vnd.github+json' }
-    });
-    const data = await resp.json();
-    if (data.assets && data.assets.length > 0) {
-      const link = data.assets[0].browser_download_url;
-      document.getElementById('downloadLink').href = link;
-      document.getElementById('downloadArea').style.display = 'block';
-      document.getElementById('status').textContent = '✅ 构建成功！';
-    } else {
-      document.getElementById('status').textContent = '⚠️ 构建成功但未找到发布文件，请手动前往 Releases 查看';
-    }
-  } catch (e) {
-    document.getElementById('status').textContent = '⚠️ 获取下载链接失败: ' + e.message;
-  }
-}
-
-function setProgress(percent, text) {
-  const fill = document.getElementById('progressFill');
-  fill.style.width = percent + '%';
-  fill.textContent = percent + '%';
-  document.getElementById('progressText').textContent = text;
 }
 </script>
-
 </body>
 </html>
