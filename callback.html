@@ -5,34 +5,75 @@
 <title>正在授权...</title>
 <style>
 body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;background:#f6f8fa;margin:0}
-.box{background:#fff;padding:32px;border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.08);text-align:center;color:#57606a}
+.box{background:#fff;padding:32px;border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.08);text-align:center;color:#57606a;max-width:480px}
+.err{color:#cf222e;margin-top:12px}
+.ok{color:#1a7f37;margin-top:12px}
 </style>
 </head>
 <body>
-<div class="box" id="msg">正在完成授权，请稍候...</div>
+<div class="box" id="msg">
+  <div>正在完成授权，请稍候...</div>
+  <div id="detail"></div>
+</div>
+
 <script>
-const CLIENT_ID = "你的ClientID";
+// ========== 只需要改这里 ==========
+const CLIENT_ID = "Ov23livXDpd3eWKlgFRi";       // ← 换成 tinyspace 的真实 Client ID
+const CLIENT_SECRET = "f64d7ff0ff711f99d969272132b50f68c9ce392d";     // ← 换成 tinyspace 的 Client Secret
+// ==================================
 
-const code = new URLSearchParams(location.search).get("code");
+const BASE = "https://anonymous123456988.github.io/elfos";
+const REDIRECT_URI = BASE + "/callback.html";
+
 const msg = document.getElementById("msg");
+const detail = document.getElementById("detail");
 
+// 提取授权码
+const code = new URLSearchParams(location.search).get("code");
 if (!code) {
-  msg.textContent = "授权失败：未收到授权码";
+  detail.innerHTML = '<div class="err">授权失败：未收到授权码<br>' + location.search + '</div>';
 } else {
-  // 用 code 换 access_token（public client，前端直接换，无需 client_secret）
-  fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: {"Content-Type":"application/json","Accept":"application/json"},
-    body: JSON.stringify({ client_id: CLIENT_ID, code: code })
-  }).then(r => r.json()).then(j => {
-    if (j.access_token) {
-      localStorage.setItem("elfos_token", j.access_token);
-      msg.textContent = "授权成功！正在返回...";
-      setTimeout(() => location.href = "build.html", 800);
+  detail.textContent = "正在换取 Token...";
+  exchangeToken(code);
+}
+
+function exchangeToken(code) {
+  // JSONP 回调名（避免冲突）
+  const cbName = "elfos_cb_" + Math.random().toString(36).slice(2);
+
+  // 全局回调函数（GitHub 返回后会调用它）
+  window[cbName] = function(data) {
+    // 清理：移除 script 标签和全局函数
+    document.body.removeChild(script);
+    delete window[cbName];
+
+    if (data && data.access_token) {
+      localStorage.setItem("elfos_token", data.access_token);
+      detail.innerHTML = '<div class="ok">✅ 授权成功！正在返回构建页面...</div>';
+      setTimeout(() => { location.href = BASE + "/build.html"; }, 800);
     } else {
-      msg.textContent = "授权失败：" + (j.error_description || JSON.stringify(j));
+      detail.innerHTML = '<div class="err">❌ 换 Token 失败：' + JSON.stringify(data) + '</div>';
     }
-  }).catch(e => { msg.textContent = "网络错误：" + e; });
+  };
+
+  // 创建 script 标签，用 JSONP 方式请求
+  const script = document.createElement("script");
+  script.src = "https://github.com/login/oauth/access_token"
+    + "?client_id=" + encodeURIComponent(CLIENT_ID)
+    + "&client_secret=" + encodeURIComponent(CLIENT_SECRET)
+    + "&code=" + encodeURIComponent(code)
+    + "&redirect_uri=" + encodeURIComponent(REDIRECT_URI)
+    + "&callback=" + cbName;
+  document.body.appendChild(script);
+
+  // 超时处理（10秒）
+  setTimeout(() => {
+    if (window[cbName]) {
+      detail.innerHTML = '<div class="err">❌ 请求超时，请重试</div>';
+      document.body.removeChild(script);
+      delete window[cbName];
+    }
+  }, 10000);
 }
 </script>
 </body>
