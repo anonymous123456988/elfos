@@ -79,9 +79,9 @@ jobs:
           ELF=$(find build/input -name "os.elf" | head -1)
           python3 elf2os.py \
             --arch "${{ inputs.arch }}" \
-            --名称 "${{ inputs.name }}" \
+            --name "${{ inputs.name }}" \
             --elf "$ELF" \
-            --输出 "build/output/${{ inputs.name }}.iso"
+            --output "build/output/${{ inputs.name }}.iso"
 
       # ============================================================
       # 上传 Release
