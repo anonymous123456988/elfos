@@ -1,4 +1,4 @@
-name: Build ISO with Payment
+name: elf2os build
 
 on:
   workflow_dispatch:
@@ -8,59 +8,59 @@ on:
         required: true
         default: 'x86_64'
       name:
-        description: '系统名称'
+        description: 'OS名称'
         required: true
         default: 'myos'
-      package:
-        description: '压缩包路径'
-        required: true
       build_id:
         description: '构建ID'
+        required: true
+      package:
+        description: '压缩包路径（仓库内相对路径）'
         required: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+
       # ===== 第一步：创建订单并等待付款 =====
       - name: 创建订单并等待付款
-        env:
-          PID: "4146"
-          KEY: "m836w016zFmc1mSq1SQW6Xmw60C1MSmZ"
-          MONEY: "0.05"
-          TYPE: "wxpay" # 如需支付宝改 alipay
-          NOTIFY: "https://example.com/notify"
-          RETURN: "https://example.com/return"
         run: |
           set -e
+
+          PID="4146"
+          KEY="m836w016zFmc1mSq1SQW6Xmw60C1MSmZ"
+          MONEY="0.05"
+          TYPE="wxpay"
+          NOTIFY="https://example.com/notify"
+          RETURN="https://example.com/return"
           OUT_TRADE_NO="elf2os-${{ inputs.build_id }}-$(date +%s)"
           NAME="elf2os-${{ inputs.name }}"
-          
-          echo "商户编号: $PID"
 
-          # 获取公网 IP 作为 clientip
-          CLIENT_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me)
+          # 获取公网 IP
+          CLIENT_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
+          echo "商户ID: $PID"
           echo "客户端IP: $CLIENT_IP"
 
-          # 1. 用 Python 严格按 ASCII 升序生成 MD5 签名（包含 clientip）
-          SIGN=$(python3 -c "
-          import hashlib
+          # 写 Python 签名脚本到文件（避免内联缩进问题）
+          cat > /tmp/sign.py << 'EOF'
+          import hashlib, sys
+          pid, typ, money, name, out_trade_no, notify_url, return_url, clientip, key = sys.argv[1:]
           params = {
-              'pid': '$PID',
-              'type': '$TYPE',
-              'money': '$MONEY',
-              'name': '$NAME',
-              'out_trade_no': '$OUT_TRADE_NO',
-              'notify_url': '$NOTIFY',
-              'return_url': '$RETURN',
-              'clientip': '$CLIENT_IP'
+              'pid': pid, 'type': typ, 'money': money, 'name': name,
+              'out_trade_no': out_trade_no, 'notify_url': notify_url,
+              'return_url': return_url, 'clientip': clientip
           }
-          s = '&'.join([f'{k}={params[k]}' for k in sorted(params.keys())]) + '$KEY'
+          s = '&'.join([f'{k}={params[k]}' for k in sorted(params.keys())]) + key
           print(hashlib.md5(s.encode('utf-8')).hexdigest())
-          ")
+          EOF
+
+          SIGN=$(python3 /tmp/sign.py "$PID" "$TYPE" "$MONEY" "$NAME" "$OUT_TRADE_NO" "$NOTIFY" "$RETURN" "$CLIENT_IP" "$KEY")
           echo "签名: $SIGN"
 
-          # 2. POST 创建订单（包含 clientip）
+          # POST 创建订单
           RESP=$(curl -s -X POST "https://api.payqixiang.cn/mapi.php" \
             --data-urlencode "pid=$PID" \
             --data-urlencode "type=$TYPE" \
@@ -75,18 +75,23 @@ jobs:
 
           echo "创建订单返回: $RESP"
 
-          # 提取支付链接
-          PAYURL=$(echo "$RESP" | python3 -c "
-          import sys,json
+          # 写 Python 解析脚本到文件
+          cat > /tmp/parse.py << 'EOF'
+          import json, sys
           try:
-              d=json.load(sys.stdin)
-              print(d.get('payurl','') or d.get('qrcode','') or d.get('url',''))
-          except:
+              d = json.loads(sys.stdin.read())
+              if d.get('code') == 1:
+                  print(d.get('payurl', '') or d.get('qrcode', '') or d.get('url', ''))
+              else:
+                  print('')
+          except Exception:
               print('')
-          ")
+          EOF
+
+          PAYURL=$(echo "$RESP" | python3 /tmp/parse.py)
 
           if [ -z "$PAYURL" ]; then
-            echo "❌ 创建订单失败"
+            echo "❌ 创建订单失败，返回: $RESP"
             exit 1
           fi
 
@@ -95,17 +100,20 @@ jobs:
           echo "$PAYURL"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          # 3. 轮询等支付（最多10分钟）
+          # 轮询等支付（最多10分钟）
           for i in $(seq 1 60); do
             sleep 10
             Q=$(curl -s "https://api.payqixiang.cn/api.php?act=order&pid=$PID&key=$KEY&out_trade_no=$OUT_TRADE_NO")
-            STATUS=$(echo "$Q" | python3 -c "
-            import sys,json
+
+            cat > /tmp/status.py << 'EOF'
+            import json, sys
             try:
-                print(str(json.load(sys.stdin).get('status','0')))
-            except:
+                print(str(json.loads(sys.stdin.read()).get('status', '0')))
+            except Exception:
                 print('0')
-            ")
+            EOF
+
+            STATUS=$(echo "$Q" | python3 /tmp/status.py)
             echo "  查询($((i*10))s): status=$STATUS"
             if [ "$STATUS" = "1" ]; then
               echo "✅ 支付成功，开始构建！"
