@@ -184,50 +184,62 @@ async function startBuild(){
   }catch(e){log("❌ "+e.message,"err");btn.disabled=false}
 }
 
-// ✅ 修复：优先读取 Actions 上报的状态文件，避免未支付就显示已支付 / 支付后卡住
+// ✅ 修复：通过 Jobs API 实时读取 step 名称判断支付环节，消除 raw 文件缓存导致的卡顿
 async function pollActions(forkName, out_trade_no, payUrl, btn, build_id){
   let payShown=false;
   for(let i=0;i<120;i++){
     await new Promise(r=>setTimeout(r,5000));
     try{
-      // 优先读状态文件（权威来源）
-      const statusResp=await fetch(`https://raw.githubusercontent.com/${forkName}/main/status/${out_trade_no}.json?t=${Date.now()}`);
-      if(statusResp.ok){
-        const st=await statusResp.json();
-
-        if(st.status==="waiting_payment" && !payShown){
-          payShown=true;
-          document.getElementById("payUrlLink").href=payUrl;
-          document.getElementById("payUrlLink").textContent=payUrl;
-          document.getElementById("payArea").style.display="block";
-          setProgress(20,"⏳ 请完成支付...");
-          log("💰 支付链接已展示，请付款...","ok");
-        }
-
-        if(st.status==="paid"){
-          setProgress(50,"✅ 已支付，编译中（解压→编译→上传）...");
-          log("✅ 检测到支付成功，开始编译...","ok");
-        }
-
-        if(st.status==="timeout"){
-          setProgress(0,"❌ 支付超时");
-          log("❌ 支付超时，请重新构建","err");
-          btn.disabled=false;
-          return;
-        }
-      }
-
-      // 同时查 Actions 运行的最终状态
       const resp=await api("/repos/"+forkName+"/actions/runs?per_page=5");
       const data=await resp.json();
       const run=data.workflow_runs&&data.workflow_runs.find(r=>r.name==="elf2os build");
       if(!run) continue;
 
+      // 通过 Jobs API 看 step 名称（实时，无 CDN 缓存）
+      if(!payShown && run.status==="in_progress"){
+        try{
+          const jobsResp=await api("/repos/"+forkName+"/actions/runs/"+run.id+"/jobs");
+          const jobsData=await jobsResp.json();
+          const steps=jobsData.jobs&&jobsData.jobs[0]&&jobsData.jobs[0].steps;
+          if(steps){
+            const stepNames=steps.map(s=>s.name).join(" ");
+            if(stepNames.indexOf("等待支付")!==-1 || stepNames.indexOf("上报状态")!==-1){
+              payShown=true;
+              document.getElementById("payUrlLink").href=payUrl;
+              document.getElementById("payUrlLink").textContent=payUrl;
+              document.getElementById("payArea").style.display="block";
+              setProgress(20,"⏳ 请完成支付...");
+              log("💰 支付链接已展示，请付款...","ok");
+            }
+          }
+        }catch(e){/* jobs API 偶发慢，忽略继续轮询 */}
+      }
+
+      // 状态文件作为辅助确认 paid（带时间戳防缓存）
+      if(payShown){
+        try{
+          const statusResp=await fetch(`https://raw.githubusercontent.com/${forkName}/main/status/${out_trade_no}.json?t=${Date.now()}`);
+          if(statusResp.ok){
+            const st=await statusResp.json();
+            if(st.status==="paid"){
+              setProgress(50,"✅ 已支付，编译中（解压→编译→上传）...");
+              log("✅ 检测到支付成功，开始编译...","ok");
+            }
+            if(st.status==="timeout"){
+              setProgress(0,"❌ 支付超时");
+              log("❌ 支付超时，请重新构建","err");
+              btn.disabled=false;
+              return;
+            }
+          }
+        }catch(e){}
+      }
+
       if(run.status==="completed"){
         if(run.conclusion==="success"){
           setProgress(100,"🎉 构建完成！");
           log("✅ 构建成功！获取下载链接...","ok");
-          showDownload(forkName, build_id);
+          showDownload(forkName,build_id);
         }else{
           setProgress(0,"❌ 构建失败: "+run.conclusion);
           log("❌ 构建失败","err");
@@ -235,9 +247,7 @@ async function pollActions(forkName, out_trade_no, payUrl, btn, build_id){
         btn.disabled=false;
         return;
       }
-    }catch(e){
-      console.error(e);
-    }
+    }catch(e){console.error(e)}
     if(!payShown) setProgress(10+i,"等待 Actions 启动...");
   }
   log("⏱️ 超时，请手动查看 Actions 页面","err");
