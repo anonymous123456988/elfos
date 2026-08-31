@@ -8,7 +8,7 @@ on:
         type: choice
         options: [x86_64, aarch64, riscv64, i386, arm64, arm, ppc64le, mips64]
         default: x86_64
-      os_name:
+      name:
         description: 操作系统名称
         type: string
         default: myos
@@ -26,7 +26,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ===== 安装编译依赖（elf2os.py 内部也会 apt-get，这里预装加速）=====
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -38,50 +37,44 @@ jobs:
             gcc-arm-linux-gnueabihf gcc-powerpc64le-linux-gnu gcc-mips64-linux-gnuabi64 \
             python3 python3-pip qemu-user-static
 
-      # ===== 确认用户 ELF 存在（未上传则用示例占位，避免构建中断）=====
       - name: Check user ELF
         run: |
           mkdir -p elf
           BUILD_ID="${{ inputs.build_id }}"
-          if [ ! -f "elf/${BUILD_ID}.elf" ]; then
-            echo "::notice::未提供 ${BUILD_ID}.elf，将仅编译内核"
-          else
-            echo "::notice::使用用户 ELF: elf/${BUILD_ID}.elf"
+          if [ -f "elf/${BUILD_ID}.elf" ]; then
             echo "ELF_PATH=elf/${BUILD_ID}.elf" >> $GITHUB_ENV
+            echo "::notice::使用用户 ELF: elf/${BUILD_ID}.elf"
+          else
+            echo "::notice::未提供 ${BUILD_ID}.elf，将仅编译内核"
           fi
 
-      # ===== 运行构建器（参数与你的 CLI 保持一致）=====
       - name: Run elf2os
         env:
           SUDO_PASSWORD: ""
         run: |
           ARCH="${{ inputs.arch }}"
-          OS_NAME="${{ inputs.os_name }}"
-          BUILD_ID="${{ inputs.build_id }}"
-
-          # elf2os.py 的 CLI 参数按你实际脚本调整：
-          # 常见形式：--arch / --os-name / --elf / --output
-          # 若你的脚本用不同参数名，改成对应的即可
+          NAME="${{ inputs.name }}"
           EXTRA=""
           if [ -n "$ELF_PATH" ]; then EXTRA="--elf $ELF_PATH"; fi
 
+          # 关键：--cli 强制命令行模式，--name 用你脚本的真实参数名
           python3 elf2os.py \
+            --cli \
             --arch "$ARCH" \
-            --os-name "$OS_NAME" \
-            --build-id "$BUILD_ID" \
+            --name "$NAME" \
             --output iso \
             $EXTRA
 
-      # ===== 收集产物并发布到 Release =====
       - name: Collect ISO
         id: collect
         run: |
           ARCH="${{ inputs.arch }}"
-          OS_NAME="${{ inputs.os_name }}"
-          # 产物路径：os/<arch>/<os_name>.iso（按你脚本实际输出调整）
-          ISO_PATH=$(find os/$ARCH -maxdepth 1 -name "*.iso" | head -n1)
+          NAME="${{ inputs.name }}"
+          # 产物路径：按你脚本实际输出调整
+          ISO_PATH=$(find os/$ARCH -maxdepth 1 -name "${NAME}*.iso" 2>/dev/null | head -n1)
           if [ -z "$ISO_PATH" ]; then
-            echo "::error::未找到 ISO 产物"
+            echo "::error::未找到 ISO 产物，列出 os/ 目录内容："
+            find os -type f | head -50
             exit 1
           fi
           echo "iso=$ISO_PATH" >> $GITHUB_OUTPUT
@@ -96,7 +89,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ===== 同时保留 Artifact（方便调试）=====
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
