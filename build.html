@@ -1,1 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>elf2os 在线构建</title>
+<style>
+body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f6f8fa;margin:0;padding:16px}
+.box{background:#fff;padding:32px;border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.08);max-width:520px;width:100%}
+h2{margin-top:0}
+label{display:block;margin:12px 0 4px;font-size:13px;color:#57606a}
+select,input[type=text],input[type=file]{width:100%;padding:9px;border:1px solid #d0d7de;border-radius:6px;box-sizing:border-box}
+button{padding:11px 22px;background:#1f883d;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;margin-top:16px}
+button:hover{background:#1a7f37}
+button:disabled{background:#94d3a2;cursor:not-allowed}
+.log{margin-top:16px;font-size:13px;color:#57606a;white-space:pre-wrap;max-height:220px;overflow:auto;background:#f6f8fa;padding:10px;border-radius:6px}
+.err{color:#cf222e}
+.ok{color:#1a7f37}
+</style>
+</head>
+<body>
+<div class="box">
+  <h2>🛠️ elf2os 在线构建</h2>
+  <div id="area"></div>
+</div>
+<script>
+const CLIENT_ID = "你的ClientID";
+const REPO = "anonymous123456988/anonymous123456988.github.io"; // 模板仓库
+const token = localStorage.getItem("elfos_token");
+const area = document.getElementById("area");
 
+// ===== 未登录：显示登录按钮 =====
+if (!token) {
+  area.innerHTML = `
+    <p style="color:#57606a">首次使用需要用你的 GitHub 账号授权（用于 Fork 仓库并触发构建）。</p>
+    <button onclick="login()">使用 GitHub 授权</button>
+    <div class="log" id="log"></div>`;
+} else {
+  // ===== 已登录：显示构建表单 =====
+  area.innerHTML = `
+    <label>架构</label>
+    <select id="arch">
+      <option value="x86_64">x86_64</option>
+      <option value="aarch64">AArch64 (ARM64)</option>
+      <option value="riscv64">RISC-V 64</option>
+      <option value="i386">i386 (x86 32-bit)</option>
+    </select>
+    <label>OS 名称</label>
+    <input id="os_name" type="text" value="myos">
+    <label>build_id（对应已上传 ELF 的标识，留空则用 os_name）</label>
+    <input id="build_id" type="text" placeholder="如 v1 / 2026-01-01">
+    <label>用户程序 ELF 文件（可选，不传则只编译内核）</label>
+    <input id="elf" type="file" accept=".elf,.bin">
+    <button id="btn" onclick="forkAndBuild()">Fork 并构建</button>
+    <div class="log" id="log">已授权 ✓</div>`;
+}
+
+function login() {
+  const state = Math.random().toString(36).slice(2);
+  localStorage.setItem("elfos_state", state);
+  location.href = "https://github.com/login/oauth/authorize"
+    + "?client_id=" + CLIENT_ID
+    + "&redirect_uri=" + encodeURIComponent(location.origin + "/elfos/callback.html")
+    + "&scope=public_repo"
+    + "&state=" + state;
+}
+
+// ===== GitHub API 封装 =====
+function api(path, opts = {}) {
+  return fetch("https://api.github.com" + path, {
+    ...opts,
+    headers: {
+      "Authorization": "Bearer " + token,
+      "Accept": "application/vnd.github+json",
+      ...(opts.headers || {})
+    }
+  });
+}
+
+const logEl = () => document.getElementById("log");
+function log(msg, cls) {
+  const e = logEl();
+  if (!e) return;
+  e.textContent += msg + "\n";
+  if (cls) e.className = "log " + cls;
+}
+
+// ===== 主流程：Fork → 上传 ELF → 触发 Actions =====
+async function forkAndBuild() {
+  const btn = document.getElementById("btn");
+  btn.disabled = true;
+  log("");
+
+  const arch = document.getElementById("arch").value;
+  const os_name = document.getElementById("os_name").value || "myos";
+  const build_id = document.getElementById("build_id").value || os_name;
+  const elfFile = document.getElementById("elf").files[0];
+
+  try {
+    // 1. Fork 模板仓库到访客名下（已存在则返回已有 fork）
+    log("① 正在 Fork 仓库...");
+    let res = await api("/repos/" + REPO + "/forks", { method: "POST" });
+    if (res.status === 404) throw new Error("仓库不存在或 App 无权限");
+    const fork = await res.json();
+    const forkName = fork.full_name;
+    if (!forkName) throw new Error("Fork 失败：" + JSON.stringify(fork));
+    log("  Fork → " + forkName, "ok");
+
+    // 等待 fork 完成 + Actions 启用
+    await new Promise(r => setTimeout(r, 6000));
+
+    // 2. 上传 ELF 到 fork 的 elf/<build_id>.elf（如果选了文件）
+    if (elfFile) {
+      log("② 上传 ELF 文件...");
+      const content = await elfFile.arrayBuffer();
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(content)));
+      // 先查是否已有文件（决定用 PUT 的 SHA）
+      let sha = null;
+      const exist = await api(`/repos/${forkName}/contents/elf/${build_id}.elf?ref=main`);
+      if (exist.ok) sha = (await exist.json()).sha;
+      const put = await api(`/repos/${forkName}/contents/elf/${build_id}.elf`, {
+        method: "PUT",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({
+          message: "elf2os: upload " + build_id + ".elf",
+          branch: "main",
+          content: b64,
+          sha: sha
+        })
+      });
+      if (!put.ok) throw new Error("ELF 上传失败：" + (await put.json()).message);
+      log("  ELF 上传完成", "ok");
+    } else {
+      log("② 未选 ELF，跳过上传");
+    }
+
+    // 3. 触发 workflow_dispatch
+    log("③ 触发构建 workflow...");
+    const disp = await api(`/repos/${forkName}/actions/workflows/build.yml/dispatches`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        ref: "main",
+        inputs: { arch, os_name, build_id }
+      })
+    });
+    if (disp.status !== 204) throw new Error("触发失败：" + disp.status);
+    log("  已触发 ✓", "ok");
+
+    // 4. 轮询 Actions 运行状态
+    log("④ 等待构建（约 5-15 分钟，可稍后刷新）...");
+    pollStatus(forkName);
+
+  } catch (e) {
+    log("❌ " + e.message, "err");
+    btn.disabled = false;
+  }
+}
+
+// ===== 轮询：找到最新 run → 完成后取 Release 产物 =====
+async function pollStatus(forkName) {
+  for (let i = 0; i < 60; i++) {
+    await new Promise(r => setTimeout(r, 15000));
+    try {
+      const runs = await api(`/repos/${forkName}/actions/runs?per_page=5&status=completed`).then(r => r.json());
+      const run = runs.workflow_runs && runs.workflow_runs.find(r => r.name === "elf2os build");
+      if (run) {
+        if (run.conclusion === "success") {
+          log("✅ 构建完成！正在获取产物...", "ok");
+          // 取最新 Release 里的 ISO
+          const rels = await api(`/repos/${forkName}/releases/latest`).then(r => r.json()).catch(() => null);
+          if (rels && rels.assets && rels.assets.length) {
+            const iso = rels.assets.find(a => a.name.endsWith(".iso")) || rels.assets[0];
+            log("📥 下载：" + iso.browser_download_url, "ok");
+            area.innerHTML += `<p><a href="${iso.browser_download_url}" target="_blank" style="color:#0969da">⬇️ 点击下载 ${iso.name}</a></p>`;
+          } else {
+            log("构建成功，但未找到 Release 产物（请到 fork 仓库 Releases 查看）", "ok");
+          }
+          return;
+        } else {
+          log("❌ 构建失败，结论：" + run.conclusion, "err");
+          return;
+        }
+      }
+    } catch (e) {}
+  }
+  log("⏱️ 轮询超时，请稍后到 Actions 页面查看", "err");
+}
+</script>
+</body>
+</html>
