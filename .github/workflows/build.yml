@@ -1,1 +1,104 @@
+name: elf2os build
 
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 目标架构
+        type: choice
+        options: [x86_64, aarch64, riscv64, i386, arm64, arm, ppc64le, mips64]
+        default: x86_64
+      os_name:
+        description: 操作系统名称
+        type: string
+        default: myos
+      build_id:
+        description: 构建标识（对应 elf/ 下的 ELF 文件名，不含扩展名）
+        type: string
+        default: myos
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ===== 安装编译依赖（elf2os.py 内部也会 apt-get，这里预装加速）=====
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bc flex bison libssl-dev libelf-dev \
+            wget cpio gzip xz-utils tar \
+            grub-common grub-pc-bin grub-efi-amd64-bin \
+            gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu gcc-i686-linux-gnu \
+            gcc-arm-linux-gnueabihf gcc-powerpc64le-linux-gnu gcc-mips64-linux-gnuabi64 \
+            python3 python3-pip qemu-user-static
+
+      # ===== 确认用户 ELF 存在（未上传则用示例占位，避免构建中断）=====
+      - name: Check user ELF
+        run: |
+          mkdir -p elf
+          BUILD_ID="${{ inputs.build_id }}"
+          if [ ! -f "elf/${BUILD_ID}.elf" ]; then
+            echo "::notice::未提供 ${BUILD_ID}.elf，将仅编译内核"
+          else
+            echo "::notice::使用用户 ELF: elf/${BUILD_ID}.elf"
+            echo "ELF_PATH=elf/${BUILD_ID}.elf" >> $GITHUB_ENV
+          fi
+
+      # ===== 运行构建器（参数与你的 CLI 保持一致）=====
+      - name: Run elf2os
+        env:
+          SUDO_PASSWORD: ""
+        run: |
+          ARCH="${{ inputs.arch }}"
+          OS_NAME="${{ inputs.os_name }}"
+          BUILD_ID="${{ inputs.build_id }}"
+
+          # elf2os.py 的 CLI 参数按你实际脚本调整：
+          # 常见形式：--arch / --os-name / --elf / --output
+          # 若你的脚本用不同参数名，改成对应的即可
+          EXTRA=""
+          if [ -n "$ELF_PATH" ]; then EXTRA="--elf $ELF_PATH"; fi
+
+          python3 elf2os.py \
+            --arch "$ARCH" \
+            --os-name "$OS_NAME" \
+            --build-id "$BUILD_ID" \
+            --output iso \
+            $EXTRA
+
+      # ===== 收集产物并发布到 Release =====
+      - name: Collect ISO
+        id: collect
+        run: |
+          ARCH="${{ inputs.arch }}"
+          OS_NAME="${{ inputs.os_name }}"
+          # 产物路径：os/<arch>/<os_name>.iso（按你脚本实际输出调整）
+          ISO_PATH=$(find os/$ARCH -maxdepth 1 -name "*.iso" | head -n1)
+          if [ -z "$ISO_PATH" ]; then
+            echo "::error::未找到 ISO 产物"
+            exit 1
+          fi
+          echo "iso=$ISO_PATH" >> $GITHUB_OUTPUT
+          echo "name=$(basename $ISO_PATH)" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ inputs.build_id }}-${{ github.run_number }}
+          name: Build ${{ inputs.build_id }} (${{ inputs.arch }})
+          files: ${{ steps.collect.outputs.iso }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ===== 同时保留 Artifact（方便调试）=====
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: elf2os-${{ inputs.arch }}-${{ inputs.build_id }}
+          path: ${{ steps.collect.outputs.iso }}
