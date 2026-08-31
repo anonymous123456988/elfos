@@ -140,7 +140,7 @@ async function forkAndBuild() {
       headers: {"Content-Type":"application/json"},
       body: JSON.stringify({
         ref: "main",
-        inputs: { arch, os_name, build_id }
+        inputs: { arch, name, build_id }
       })
     });
     if (disp.status !== 204) throw new Error("触发失败：" + disp.status);
