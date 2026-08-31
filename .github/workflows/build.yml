@@ -1,4 +1,4 @@
-name: elf2os build
+name: Build ISO with Payment
 
 on:
   workflow_dispatch:
@@ -8,40 +8,41 @@ on:
         required: true
         default: 'x86_64'
       name:
-        description: 'OS名称'
+        description: '系统名称'
         required: true
         default: 'myos'
+      package:
+        description: '压缩包路径'
+        required: true
       build_id:
         description: '构建ID'
-        required: true
-      package:
-        description: '压缩包路径（仓库内相对路径）'
         required: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-
       # ===== 第一步：创建订单并等待付款 =====
       - name: 创建订单并等待付款
         env:
           PID: "4146"
           KEY: "m836w016zFmc1mSq1SQW6Xmw60C1MSmZ"
           MONEY: "0.05"
-          TYPE: "wxpay"
+          TYPE: "wxpay" # 如需支付宝改 alipay
           NOTIFY: "https://example.com/notify"
           RETURN: "https://example.com/return"
         run: |
           set -e
           OUT_TRADE_NO="elf2os-${{ inputs.build_id }}-$(date +%s)"
           NAME="elf2os-${{ inputs.name }}"
+          
+          echo "商户编号: $PID"
 
-          echo "商户ID: $PID"
+          # 获取公网 IP 作为 clientip
+          CLIENT_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me)
+          echo "客户端IP: $CLIENT_IP"
 
-          # 1. 严格 ASCII 升序 MD5 签名
+          # 1. 用 Python 严格按 ASCII 升序生成 MD5 签名（包含 clientip）
           SIGN=$(python3 -c "
           import hashlib
           params = {
@@ -52,13 +53,14 @@ jobs:
               'out_trade_no': '$OUT_TRADE_NO',
               'notify_url': '$NOTIFY',
               'return_url': '$RETURN',
+              'clientip': '$CLIENT_IP'
           }
           s = '&'.join([f'{k}={params[k]}' for k in sorted(params.keys())]) + '$KEY'
           print(hashlib.md5(s.encode('utf-8')).hexdigest())
           ")
           echo "签名: $SIGN"
 
-          # 2. POST 创建订单
+          # 2. POST 创建订单（包含 clientip）
           RESP=$(curl -s -X POST "https://api.payqixiang.cn/mapi.php" \
             --data-urlencode "pid=$PID" \
             --data-urlencode "type=$TYPE" \
@@ -67,6 +69,7 @@ jobs:
             --data-urlencode "out_trade_no=$OUT_TRADE_NO" \
             --data-urlencode "notify_url=$NOTIFY" \
             --data-urlencode "return_url=$RETURN" \
+            --data-urlencode "clientip=$CLIENT_IP" \
             --data-urlencode "sign=$SIGN" \
             --data-urlencode "sign_type=MD5")
 
@@ -91,7 +94,6 @@ jobs:
           echo "💰 请支付 0.05 元："
           echo "$PAYURL"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "PAYURL=$PAYURL" >> $GITHUB_OUTPUT
 
           # 3. 轮询等支付（最多10分钟）
           for i in $(seq 1 60); do
