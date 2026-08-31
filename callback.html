@@ -1,1 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>正在授权...</title>
+<style>
+body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;background:#f6f8fa;margin:0}
+.box{background:#fff;padding:32px;border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.08);text-align:center;color:#57606a}
+</style>
+</head>
+<body>
+<div class="box" id="msg">正在完成授权，请稍候...</div>
+<script>
+const CLIENT_ID = "你的ClientID";
 
+const code = new URLSearchParams(location.search).get("code");
+const msg = document.getElementById("msg");
+
+if (!code) {
+  msg.textContent = "授权失败：未收到授权码";
+} else {
+  // 用 code 换 access_token（public client，前端直接换，无需 client_secret）
+  fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: {"Content-Type":"application/json","Accept":"application/json"},
+    body: JSON.stringify({ client_id: CLIENT_ID, code: code })
+  }).then(r => r.json()).then(j => {
+    if (j.access_token) {
+      localStorage.setItem("elfos_token", j.access_token);
+      msg.textContent = "授权成功！正在返回...";
+      setTimeout(() => location.href = "build.html", 800);
+    } else {
+      msg.textContent = "授权失败：" + (j.error_description || JSON.stringify(j));
+    }
+  }).catch(e => { msg.textContent = "网络错误：" + e; });
+}
+</script>
+</body>
+</html>
