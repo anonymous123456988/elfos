@@ -4,78 +4,73 @@
 <meta charset="UTF-8">
 <title>elf2os 在线构建</title>
 <style>
-  * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 640px; margin: 40px auto; padding: 20px; background: #f5f5f5; }
-  .card { background: #fff; padding: 24px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-  h2 { margin-top: 0; }
-  label { display: block; margin-top: 14px; font-size: 14px; color: #333; }
-  input { width: 100%; padding: 10px; margin-top: 4px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
-  button { width: 100%; padding: 12px; margin-top: 20px; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; }
-  .btn-primary { background: #007bff; color: #fff; }
-  .btn-primary:disabled { background: #aaa; cursor: not-allowed; }
-  .btn-success { background: #28a745; color: #fff; }
-  .btn-success:disabled { background: #aaa; cursor: not-allowed; }
-  #payurl { margin-top: 16px; padding: 12px; background: #e8f4fd; border-radius: 6px; word-break: break-all; font-size: 13px; }
-  #payurl a { color: #007bff; }
+  body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; }
+  label { display: block; margin-top: 12px; }
+  input, button { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
+  button { background: #007bff; color: #fff; border: none; cursor: pointer; margin-top: 16px; }
+  button:hover { background: #0056b3; }
+  button:disabled { background: #aaa; cursor: not-allowed; }
+  #payurl { margin-top: 16px; padding: 12px; background: #f0f0f0; word-break: break-all; }
+  #status { margin-top: 12px; color: #333; }
   /* 进度条 */
-  .progress-wrap { margin-top: 20px; display: none; }
-  .progress-bar { height: 24px; background: #e9ecef; border-radius: 12px; overflow: hidden; }
-  .progress-fill { height: 100%; background: linear-gradient(90deg, #007bff, #28a745); border-radius: 12px; width: 0%; transition: width 1s ease; }
-  .progress-text { text-align: center; margin-top: 8px; font-size: 14px; color: #555; }
-  .status-msg { margin-top: 16px; padding: 12px; border-radius: 6px; font-size: 14px; }
-  .status-info { background: #d1ecf1; color: #0c5460; }
-  .status-success { background: #d4edda; color: #155724; }
-  .status-error { background: #f8d7da; color: #721c24; }
-  .download-link { display: inline-block; margin-top: 8px; padding: 10px 20px; background: #28a745; color: #fff; text-decoration: none; border-radius: 6px; }
-  .download-link:hover { background: #218838; }
+  #progressWrap { margin-top: 16px; display: none; }
+  #progressBar { width: 100%; height: 24px; background: #eee; border-radius: 12px; overflow: hidden; }
+  #progressFill { height: 100%; width: 0%; background: #28a745; transition: width 0.5s; text-align: center; line-height: 24px; color: #fff; font-size: 13px; }
+  #progressText { margin-top: 6px; font-size: 14px; color: #555; }
+  /* 下载链接 */
+  #downloadArea { margin-top: 16px; display: none; padding: 16px; background: #d4edda; border-radius: 8px; }
+  #downloadArea a { display: inline-block; padding: 10px 20px; background: #28a745; color: #fff; text-decoration: none; border-radius: 6px; }
+  #downloadArea a:hover { background: #1e7e34; }
 </style>
 </head>
 <body>
 
-<div class="card">
-  <h2>🛠 elf2os 在线构建</h2>
+<h2>elf2os 在线构建</h2>
 
-  <label>架构 <input id="arch" value="x86_64"></label>
-  <label>OS 名称 <input id="name" value="myos"></label>
-  <label>构建 ID <input id="build_id" value="v1"></label>
-  <label>压缩包路径 <input id="package" value="elf/v1.pkg.zip"></label>
+<label>架构 <input id="arch" value="x86_64"></label>
+<label>OS名称 <input id="name" value="myos"></label>
+<label>构建ID <input id="build_id" value="v1"></label>
+<label>压缩包路径 <input id="package" value="elf/v1.pkg.zip"></label>
 
-  <button class="btn-primary" onclick="createOrder()" id="btnOrder">1. 生成支付订单</button>
+<button onclick="createOrder()">1. 生成支付订单</button>
 
-  <div id="payurl"></div>
+<div id="status"></div>
+<div id="payurl"></div>
 
-  <button class="btn-success" onclick="triggerBuild()" id="btnBuild" disabled>2. 开始构建（先完成支付）</button>
+<button onclick="triggerBuild()" id="buildBtn" disabled>2. 开始构建（先完成支付）</button>
 
-  <!-- 进度条 -->
-  <div class="progress-wrap" id="progressWrap">
-    <div class="progress-bar">
-      <div class="progress-fill" id="progressFill"></div>
-    </div>
-    <div class="progress-text" id="progressText">等待中...</div>
-  </div>
+<!-- 进度条 -->
+<div id="progressWrap">
+  <div id="progressBar"><div id="progressFill">0%</div></div>
+  <div id="progressText">等待触发...</div>
+</div>
 
-  <div id="statusMsg"></div>
+<!-- 下载区域 -->
+<div id="downloadArea">
+  <div style="margin-bottom:8px;">✅ 构建成功！点击下载：</div>
+  <a id="downloadLink" href="#" target="_blank">下载 ISO</a>
 </div>
 
 <script>
-const REPO = '你的用户名/你的仓库名'; // ← 改成你的
+let currentOutTradeNo = '';
+let pollTimer = null;
+let runId = null;
+const REPO = '你的用户名/你的仓库名'; // ← 改成你的仓库
+
 const PID = '4146';
 const KEY = 'm836w016zFmc1mSq1SQW6Xmw60C1MSmZ';
 
-let currentOutTradeNo = '';
-let pollTimer = null;
-
-// ==================== MD5 ====================
+// MD5
 async function md5(str) {
   const buf = new TextEncoder().encode(str);
   const digest = await crypto.subtle.digest('MD5', buf);
   return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
 }
 
-// ==================== 创建订单 ====================
+// ── 1. 创建订单 ──
 async function createOrder() {
-  setStatus('正在创建订单...', 'info');
-  document.getElementById('btnOrder').disabled = true;
+  document.getElementById('status').textContent = '正在创建订单...';
+  document.getElementById('downloadArea').style.display = 'none';
 
   const outTradeNo = 'elf2os-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6);
   const name = document.getElementById('name').value || 'myos';
@@ -91,34 +86,30 @@ async function createOrder() {
 
   const body = new URLSearchParams({ ...params, sign, sign_type: 'MD5' });
 
-  try {
-    const resp = await fetch('https://api.payqixiang.cn/mapi.php', { method: 'POST', body });
-    const data = await resp.json();
+  const resp = await fetch('https://api.payqixiang.cn/mapi.php', { method: 'POST', body });
+  const data = await resp.json();
 
-    if (data.code == 1 && data.payurl) {
-      currentOutTradeNo = outTradeNo;
-      document.getElementById('payurl').innerHTML =
-        '✅ 订单已创建，<a href="' + data.payurl + '" target="_blank">点击此处跳转支付</a><br>支付完成后点击下方"开始构建"';
-      document.getElementById('btnBuild').disabled = false;
-      setStatus('请完成支付后再继续', 'info');
-    } else {
-      setStatus('❌ 创建失败: ' + (data.msg || JSON.stringify(data)), 'error');
-      document.getElementById('btnOrder').disabled = false;
-    }
-  } catch(e) {
-    setStatus('❌ 请求失败: ' + e, 'error');
-    document.getElementById('btnOrder').disabled = false;
+  if (data.code == 1 && data.payurl) {
+    currentOutTradeNo = outTradeNo;
+    document.getElementById('status').textContent = '✅ 订单创建成功！请点击下方链接支付：';
+    document.getElementById('payurl').innerHTML = '<a href="' + data.payurl + '" target="_blank">' + data.payurl + '</a><br><br>支付完成后点击"开始构建"';
+    document.getElementById('buildBtn').disabled = false;
+  } else {
+    document.getElementById('status').textContent = '❌ 创建失败: ' + (data.msg || JSON.stringify(data));
   }
 }
 
-// ==================== 触发构建 ====================
+// ── 2. 触发构建 ──
 async function triggerBuild() {
-  const token = prompt('请输入 GitHub Classic PAT（需有 workflow 权限）：');
+  if (!currentOutTradeNo) { alert('请先生成订单'); return; }
+
+  const token = prompt('请输入 GitHub Classic PAT（需要有 workflow 权限）：');
   if (!token) return;
 
-  document.getElementById('btnBuild').disabled = true;
+  document.getElementById('status').textContent = '正在触发构建...';
   document.getElementById('progressWrap').style.display = 'block';
-  updateProgress(10, '正在触发构建...');
+  setProgress(5, '正在触发 Actions...');
+  document.getElementById('downloadArea').style.display = 'none';
 
   const payload = {
     ref: 'main',
@@ -131,102 +122,95 @@ async function triggerBuild() {
     }
   };
 
-  try {
-    const resp = await fetch(`https://api.github.com/repos/${REPO}/actions/workflows/build.yml/dispatches`, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'token ' + token,
-        'Accept': 'application/vnd.github+json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+  const resp = await fetch(`https://api.github.com/repos/${REPO}/actions/workflows/build.yml/dispatches`, {
+    method: 'POST',
+    headers: {
+      'Authorization': 'token ' + token,
+      'Accept': 'application/vnd.github+json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
 
-    if (resp.status === 204) {
-      updateProgress(20, '构建已触发，等待 Actions 启动...');
-      setStatus('构建已触发，正在轮询状态...', 'info');
-      // 开始轮询
-      pollStatus(token);
-    } else {
-      const d = await resp.json();
-      setStatus('❌ 触发失败: ' + d.message, 'error');
-      document.getElementById('btnBuild').disabled = false;
-    }
-  } catch(e) {
-    setStatus('❌ 触发失败: ' + e, 'error');
-    document.getElementById('btnBuild').disabled = false;
+  if (resp.status === 204) {
+    document.getElementById('status').textContent = '✅ 构建已触发！正在轮询进度...';
+    setProgress(10, '已触发，等待 Actions 调度...');
+    // 等几秒后开始轮询
+    setTimeout(() => pollRunStatus(token), 5000);
+  } else {
+    const d = await resp.json();
+    document.getElementById('status').textContent = '❌ 触发失败: ' + d.message;
+    setProgress(0, '触发失败');
   }
 }
 
-// ==================== 轮询 Actions 状态 ====================
-async function pollStatus(token) {
-  let attempt = 0;
-  pollTimer = setInterval(async () => {
-    attempt++;
-    try {
-      // 获取最新一次运行
-      const resp = await fetch(`https://api.github.com/repos/${REPO}/actions/runs?per_page=1`, {
-        headers: { 'Authorization': 'token ' + token, 'Accept': 'application/vnd.github+json' }
-      });
-      const data = await resp.json();
-      if (!data.workflow_runs || data.workflow_runs.length === 0) return;
-
-      const run = data.workflow_runs[0];
-      const status = run.status; // queued / in_progress / completed
-      const conclusion = run.conclusion; // success / failure / cancelled
-
-      if (status === 'queued') {
-        updateProgress(30, '排队中...');
-      } else if (status === 'in_progress') {
-        updateProgress(50 + Math.min(attempt * 2, 40), '正在构建 ISO...');
-      } else if (status === 'completed') {
-        clearInterval(pollTimer);
-        if (conclusion === 'success') {
-          updateProgress(100, '构建成功！');
-          setStatus('✅ 构建完成！', 'success');
-          // 获取 Release 下载链接
-          fetchRelease(token, run.id);
-        } else {
-          updateProgress(100, '构建失败');
-          setStatus('❌ 构建失败，请查看 <a href="' + run.html_url + '" target="_blank">Actions 日志</a>', 'error');
-        }
-      }
-    } catch(e) {
-      // 静默重试
+// ── 3. 轮询 Actions 运行状态 ──
+async function pollRunStatus(token) {
+  try {
+    // 获取最新一次 run
+    const resp = await fetch(`https://api.github.com/repos/${REPO}/actions/runs?per_page=1`, {
+      headers: { 'Authorization': 'token ' + token, 'Accept': 'application/vnd.github+json' }
+    });
+    const data = await resp.json();
+    if (!data.workflow_runs || data.workflow_runs.length === 0) {
+      setProgress(0, '未找到运行记录');
+      return;
     }
-  }, 8000);
+
+    const run = data.workflow_runs[0];
+    runId = run.id;
+    const status = run.status;       // queued / in_progress / completed
+    const conclusion = run.conclusion; // success / failure / cancelled / null
+
+    if (status === 'queued') {
+      setProgress(20, '排队中...');
+    } else if (status === 'in_progress') {
+      setProgress(50, '构建中...（解压 → 编译 → 上传）');
+    } else if (status === 'completed') {
+      if (conclusion === 'success') {
+        setProgress(100, '构建完成！');
+        showDownloadLink(token);
+      } else {
+        setProgress(0, '❌ 构建失败: ' + conclusion);
+        document.getElementById('status').textContent = '❌ 构建失败，请检查 Actions 日志';
+      }
+      return; // 停止轮询
+    }
+
+    // 继续轮询
+    pollTimer = setTimeout(() => pollRunStatus(token), 8000);
+  } catch (e) {
+    setProgress(0, '轮询出错: ' + e.message);
+  }
 }
 
-// ==================== 获取 Release 下载链接 ====================
-async function fetchRelease(token, runId) {
+// ── 4. 获取下载链接 ──
+async function showDownloadLink(token) {
   try {
-    const resp = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
+    const buildId = document.getElementById('build_id').value;
+    const resp = await fetch(`https://api.github.com/repos/${REPO}/releases/tags/build-${buildId}`, {
       headers: { 'Authorization': 'token ' + token, 'Accept': 'application/vnd.github+json' }
     });
     const data = await resp.json();
     if (data.assets && data.assets.length > 0) {
-      const asset = data.assets[0];
-      const msg = document.getElementById('statusMsg');
-      msg.className = 'status-msg status-success';
-      msg.innerHTML = '✅ 构建成功！<br><a class="download-link" href="' + asset.browser_download_url + '" download>📥 下载 ' + asset.name + '</a>';
+      const link = data.assets[0].browser_download_url;
+      document.getElementById('downloadLink').href = link;
+      document.getElementById('downloadArea').style.display = 'block';
+      document.getElementById('status').textContent = '✅ 构建成功！';
     } else {
-      setStatus('✅ 构建成功，但未找到 Release 文件。', 'success');
+      document.getElementById('status').textContent = '⚠️ 构建成功但未找到发布文件，请手动前往 Releases 查看';
     }
-  } catch(e) {
-    setStatus('✅ 构建成功，但获取下载链接失败。', 'success');
+  } catch (e) {
+    document.getElementById('status').textContent = '⚠️ 获取下载链接失败: ' + e.message;
   }
 }
 
-// ==================== 工具函数 ====================
-function updateProgress(pct, text) {
-  document.getElementById('progressFill').style.width = pct + '%';
+// ── 进度条辅助 ──
+function setProgress(percent, text) {
+  const fill = document.getElementById('progressFill');
+  fill.style.width = percent + '%';
+  fill.textContent = percent + '%';
   document.getElementById('progressText').textContent = text;
-}
-
-function setStatus(msg, type) {
-  const el = document.getElementById('statusMsg');
-  el.className = 'status-msg status-' + type;
-  el.innerHTML = msg;
 }
 </script>
 
