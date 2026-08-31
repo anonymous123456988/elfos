@@ -4,130 +4,122 @@ on:
   workflow_dispatch:
     inputs:
       arch:
-        description: "Target architecture"
         required: true
-        default: "x86_64"
       name:
-        description: "OS name (--name)"
         required: true
-        default: "myos"
       build_id:
-        description: "Build / package identifier (matches uploaded elf/<build_id>.pkg*)"
         required: true
-        default: "myos"
       package:
-        description: "Path to uploaded package, e.g. elf/<build_id>.pkg.zip"
-        required: false
-        default: ""
-
-permissions:
-  contents: write   # 用于创建 Release / 推送产物
-
-env:
-  PKG_PATH: ${{ inputs.package || format('elf/{0}.pkg.zip', inputs.build_id) }}
+        required: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
 
-      - name: Checkout fork
-        uses: actions/checkout@v4
-
-      - name: Verify package exists
+      # ===== 第一步：创建订单 =====
+      - name: Create payment order
+        id: pay
+        env:
+          MCHID: ${{ secrets.QIXIANG_MCHID }}
+          MCHKEY: ${{ secrets.QIXIANG_MCHKEY }}
         run: |
-          echo "Looking for package at: $PKG_PATH"
-          ls -la "$PKG_PATH" || {
-            echo "::error::压缩包未找到：$PKG_PATH。请确认上传的压缩包路径与 build_id 一致，且位于 elf/ 目录下。"
-            exit 1
-          }
+          ORDER_ID="elf2os_$(date +%s)_$RANDOM"
 
-      # ===== 解压：根据扩展名自动选择 unzip / tar =====
-      - name: Extract package (auto detect os.elf)
-        run: |
-          set -e
-          mkdir -p build/input
-          echo ">>> Extracting $PKG_PATH"
-          case "$PKG_PATH" in
-            *.zip)
-              # -o 自动覆盖；列出内容便于定位 os.elf
-              unzip -o "$PKG_PATH" -d build/input
-              ;;
-            *.tar.gz|*.tgz)
-              tar -xzf "$PKG_PATH" -C build/input
-              ;;
-            *)
-              echo "::error::不支持的压缩格式，仅支持 .zip / .tar.gz / .tgz"
-              exit 1
-              ;;
-          esac
+          # 按七相PAY 文档拼签名
+          SIGN_STR="mchid=${MCHID}&money=0.05&order_id=${ORDER_ID}&key=${MCHKEY}"
+          SIGN=$(echo -n "$SIGN_STR" | md5sum | awk '{print $1}')
 
-          echo ">>> Package contents:"
-          find build/input -type f | tee /tmp/files.txt
+          RESP=$(curl -s -X POST https://api.qixiangpay.cn/mapi.php \
+            -d "pid=${MCHID}" \
+            -d "type=wxpay" \
+            -d "out_trade_no=${ORDER_ID}" \
+            -d "money=0.05" \
+            -d "name=elf2os云构建" \
+            -d "sign=${SIGN}" \
+            -d "sign_type=MD5")
 
-      # ===== 强制要求压缩包内必须含 os.elf =====
-      - name: Locate os.elf
-        id: elf
-        run: |
-          set -e
-          ELF=$(find build/input -type f -name "os.elf" | head -n 1)
-          if [ -z "$ELF" ]; then
-            echo "::error::压缩包中未找到 os.elf。请确认压缩包根目录或子目录内存在 os.elf 文件。"
-            echo "已扫描的文件："
-            cat /tmp/files.txt
+          echo "七相返回: $RESP"
+          PAY_URL=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('payurl',''))")
+
+          if [ -z "$PAY_URL" ]; then
+            echo "❌ 创建订单失败"
             exit 1
           fi
-          echo "Found os.elf at: $ELF"
-          echo "elf_path=$ELF" >> "$GITHUB_OUTPUT"
-          echo "elf_dir=$(dirname "$ELF")" >> "$GITHUB_OUTPUT"
 
-      # ===== 准备构建环境（按你的 elf2os.py 实际依赖调整）=====
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update -qq
-          # 常见 ISO 构建工具；如你的 elf2os.py 用 xorriso/genisoimage 请保留
-          sudo apt-get install -y --no-install-recommends \
-            xorriso \
-            genisoimage \
-            mtools \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            || true
-          # Python 依赖（如 elf2os.py 需要）
-          pip install -r requirements.txt || true
+          echo "order_id=$ORDER_ID" >> $GITHUB_OUTPUT
+          echo "pay_url=$PAY_URL" >> $GITHUB_OUTPUT
 
-      # ===== 调用你的构建脚本 =====
-      # 约定：elf2os.py 接收 --arch / --name / --elf / --out
-      # 如你的参数名不同，按实际修改下面这一行即可
-      - name: Run elf2os.py → build ISO
+          # 写到 Summary，用户打开 Actions 页面就能看到支付链接
+          echo "## 💰 请支付 0.05 元" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "👉 **[点击这里支付]($PAY_URL)**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "支付后 Actions 会自动继续构建，无需其他操作。" >> $GITHUB_STEP_SUMMARY
+
+      # ===== 第二步：轮询等支付 =====
+      - name: Wait for payment
+        env:
+          ORDER_ID: ${{ steps.pay.outputs.order_id }}
+          MCHID: ${{ secrets.QIXIANG_MCHID }}
+          MCHKEY: ${{ secrets.QIXIANG_MCHKEY }}
         run: |
-          set -e
-          mkdir -p build/out
+          echo "等待支付..."
+          for i in $(seq 1 60); do
+            sleep 10
+
+            SIGN_STR="mchid=${MCHID}&order_id=${ORDER_ID}&key=${MCHKEY}"
+            SIGN=$(echo -n "$SIGN_STR" | md5sum | awk '{print $1}')
+
+            RESP=$(curl -s "https://api.qixiangpay.cn/api.php?act=order&pid=${MCHID}&key=${MCHKEY}&out_trade_no=${ORDER_ID}")
+
+            STATUS=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',0))")
+
+            if [ "$STATUS" = "1" ]; then
+              echo "✅ 支付确认，开始构建"
+              exit 0
+            fi
+
+            echo "  等待中... ($(( i * 10 ))秒)"
+          done
+
+          echo "❌ 超时未支付，构建终止"
+          exit 1
+
+      # ===== 第三步：解压 =====
+      - name: Extract package
+        run: |
+          PKG="${{ inputs.package }}"
+          mkdir -p build/input
+          if [[ "$PKG" == *.zip ]]; then
+            unzip -o "$PKG" -d build/input
+          elif [[ "$PKG" == *.tar.gz || "$PKG" == *.tgz ]]; then
+            tar -xzf "$PKG" -C build/input
+          fi
+
+          ELF=$(find build/input -name "os.elf" | head -1)
+          if [ -z "$ELF" ]; then
+            echo "❌ 压缩包中未找到 os.elf"
+            exit 1
+          fi
+          echo "找到 os.elf: $ELF"
+
+      # ===== 第四步：编译 ISO =====
+      - name: Build ISO
+        run: |
+          ELF=$(find build/input -name "os.elf" | head -1)
           python3 elf2os.py \
             --arch "${{ inputs.arch }}" \
             --name "${{ inputs.name }}" \
-            --elf "${{ steps.elf.outputs.elf_path }}" \
+            --elf "$ELF" \
             --workdir build/input \
-            --output "build/out/${{ inputs.name }}-${{ inputs.arch }}.iso"
+            --output iso
 
-          echo ">>> Output ISO:"
-          ls -lh build/out/
-
-      # ===== 发布 Release（自动生成 tag + 上传 ISO）=====
-      - name: Upload ISO to Release
-        uses: softprops/action-gh-release@v2
+      # ===== 第五步：上传 Release =====
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
         with:
-          tag_name: build-${{ inputs.build_id }}-${{ github.run_number }}
-          name: "Build ${{ inputs.name }} (${{ inputs.arch }}) #${{ github.run_number }}"
-          body: |
-            - arch: ${{ inputs.arch }}
-            - name: ${{ inputs.name }}
-            - build_id: ${{ inputs.build_id }}
-            - commit: ${{ github.sha }}
-          files: |
-            build/out/*.iso
+          files: "*.iso"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Done
-        run: echo "✅ ISO 已发布到 Releases"
