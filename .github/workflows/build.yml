@@ -108,7 +108,7 @@ jobs:
             --name "${{ inputs.name }}" \
             --elf "${{ steps.elf.outputs.elf_path }}" \
             --workdir build/input \
-            --out "build/out/${{ inputs.name }}-${{ inputs.arch }}.iso"
+            --output "build/out/${{ inputs.name }}-${{ inputs.arch }}.iso"
 
           echo ">>> Output ISO:"
           ls -lh build/out/
