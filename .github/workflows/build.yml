@@ -33,7 +33,21 @@ jobs:
       - uses: actions/checkout@v4
 
       # ============================================================
-      # 轮询等待支付（订单由网页端创建，Actions 只查单）
+      # 上报状态：等待支付
+      # ============================================================
+      - name: 上报状态 - 等待支付
+        run: |
+          echo '{"status":"waiting_payment"}' > status.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p status
+          echo '{"status":"waiting_payment","time":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' > status/${{ inputs.out_trade_no }}.json
+          git add status/${{ inputs.out_trade_no }}.json
+          git commit -m "status: waiting_payment ${{ inputs.out_trade_no }}" || true
+          git push || true
+
+      # ============================================================
+      # 轮询等待支付
       # ============================================================
       - name: 等待支付
         run: |
@@ -47,10 +61,19 @@ jobs:
             echo "  轮询 ${i}: code=$CODE status=$STATUS"
             if [ "$STATUS" = "1" ]; then
               echo "✅ 支付成功！"
+              # 上报状态：已支付
+              echo '{"status":"paid","time":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' > status/${{ inputs.out_trade_no }}.json
+              git add status/${{ inputs.out_trade_no }}.json
+              git commit -m "status: paid ${{ inputs.out_trade_no }}" || true
+              git push || true
               exit 0
             fi
           done
           echo "❌ 超时未支付"
+          echo '{"status":"timeout","time":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' > status/${{ inputs.out_trade_no }}.json
+          git add status/${{ inputs.out_trade_no }}.json
+          git commit -m "status: timeout ${{ inputs.out_trade_no }}" || true
+          git push || true
           exit 1
 
       # ============================================================
@@ -72,11 +95,12 @@ jobs:
           echo "找到: $ELF"
 
       # ============================================================
-      # 编译 ISO
+      # 编译 ISO（修复：英文参数）
       # ============================================================
       - name: 编译 ISO
         run: |
           ELF=$(find build/input -name "os.elf" | head -1)
+          mkdir -p build/output
           python3 elf2os.py \
             --arch "${{ inputs.arch }}" \
             --name "${{ inputs.name }}" \
