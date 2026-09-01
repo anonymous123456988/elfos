@@ -62,6 +62,7 @@ if (!savedPat) {
       <option value="x86_64">x86_64</option>
       <option value="aarch64">AArch64</option>
       <option value="riscv64">RISC-V 64</option>
+      <option value="riscv64">RISC-V 64</option>
       <option value="i386">i386</option>
     </select>
     <label>OS 名称</label>
@@ -120,20 +121,10 @@ async function fileToBase64(file){
   return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(btoa(r.result));r.onerror=rej;r.readAsBinaryString(file)});
 }
 
-// ✅ 网页直查七相（实时，2~3秒感知支付成功）
-async function checkPayment(out_trade_no){
-  try{
-    const r = await fetch(`https://api.payqixiang.cn/api.php?act=order&pid=${PID}&key=${KEY}&out_trade_no=${encodeURIComponent(out_trade_no)}`);
-    const j = await r.json();
-    return j.status === "1" || j.code === 1;
-  }catch(e){return false}
-}
-
-// ✅ 暂停 / 退款
 let POLLING = true;
 async function pauseBuild(){
   if(!confirm("确定暂停并退款吗？\n\n退款将在1-3分钟内到账。")) return;
-  POLLING = false; // 打断主轮询
+  POLLING = false;
   const btnPause = document.getElementById("btnPause");
   btnPause.disabled = true;
   btnPause.textContent = "退款处理中...";
@@ -206,43 +197,45 @@ async function startBuild(){
 }
 
 async function pollActions(forkName, out_trade_no, payUrl, btn, build_id){
-  let payShown=false, paid=false;
+  let payShown=false;
   for(let i=0;i<120 && POLLING;i++){
     await new Promise(r=>setTimeout(r,5000));
-    if(!POLLING) return; // 暂停时立即退出
+    if(!POLLING) return;
     try{
       const resp=await api("/repos/"+forkName+"/actions/runs?per_page=5");
       const data=await resp.json();
       const run=data.workflow_runs&&data.workflow_runs.find(r=>r.name==="elf2os build");
       if(!run) continue;
 
-      // 展示支付链接：Jobs API step 名称实时判断
-      if(!payShown && run.status==="in_progress"){
+      // 读 step 名称
+      let stepNames="";
+      if(run.status==="in_progress"){
         try{
           const jobsResp=await api("/repos/"+forkName+"/actions/runs/"+run.id+"/jobs");
           const jobsData=await jobsResp.json();
           const steps=jobsData.jobs&&jobsData.jobs[0]&&jobsData.jobs[0].steps;
-          if(steps){
-            const stepNames=steps.map(s=>s.name).join(" ");
-            if(stepNames.indexOf("等待支付")!==-1 || stepNames.indexOf("轮询")!==-1){
-              payShown=true;
-              document.getElementById("payUrlLink").href=payUrl;
-              document.getElementById("payUrlLink").textContent=payUrl;
-              document.getElementById("payArea").style.display="block";
-              setProgress(20,"⏳ 请完成支付...");
-              log("💰 支付链接已展示，请付款...","ok");
-            }
-          }
+          if(steps){stepNames=steps.map(s=>s.name).join(" | ");}
         }catch(e){}
       }
 
-      // ✅ 支付链接展示后，网页直查七相（秒级感知）
-      if(payShown && !paid){
-        const isPaid = await checkPayment(out_trade_no);
-        if(isPaid){
-          paid=true;
+      // 展示支付链接：看到"等待支付"step 就展示
+      if(!payShown && stepNames.indexOf("等待支付")!==-1){
+        payShown=true;
+        document.getElementById("payUrlLink").href=payUrl;
+        document.getElementById("payUrlLink").textContent=payUrl;
+        document.getElementById("payArea").style.display="block";
+        setProgress(20,"⏳ 请完成支付...");
+        log("💰 支付链接已展示，请付款...","ok");
+      }
+
+      // ✅ 支付成功判断：step 离开"等待支付"，进入"解压"或"编译"
+      if(payShown && stepNames.length>0){
+        const paid = stepNames.indexOf("解压")!==-1 || stepNames.indexOf("编译")!==-1 || stepNames.indexOf("缓存")!==-1;
+        if(paid){
+          // ✅ 隐藏支付链接，显示构建中
+          document.getElementById("payArea").style.display="none";
           setProgress(50,"✅ 支付成功！正在构建中...");
-          log("✅ 检测到支付成功，等待编译完成...","ok");
+          log("✅ 检测到支付成功，编译中...","ok");
         }
       }
 
