@@ -11,20 +11,23 @@
   input,select{width:100%;padding:9px;border:1px solid #d0d7de;border-radius:6px;box-sizing:border-box;font-size:14px}
   button{margin-top:18px;width:100%;padding:12px;background:#238636;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:16px;font-weight:600}
   button:disabled{background:#94a3b8;cursor:not-allowed}
-  .btn-pause{background:#da3633;margin-top:10px}
-  .btn-pause:hover{background:#b62324}
+  button.pause-btn{background:#d1242f;margin-top:10px}
+  button.pause-btn:hover{background:#a01e26}
+  button.pause-btn:disabled{background:#e99a9e}
+  .btn-row{display:flex;gap:10px}
+  .btn-row button{margin-top:18px}
   .hint{font-size:12px;color:#57606a;margin-top:6px}
   .pat-link{color:#0969da}
   .pat{margin-bottom:8px}
-  .log{margin-top:16px;padding:12px;background:#f6f8fa;border-radius:6px;font-family:monospace;font-size:13px;white-space:pre-wrap;max-height:300px;overflow-y:auto}
+  .log{margin-top:16px;padding:12px;background:#f6f8fa;border-radius:6px;font-family:monospace;font-size:13px;white-space:pre-wrap;max-height:160px;overflow-y:auto}
   #progressWrap{margin-top:16px;display:none}
   #progressBar{height:24px;background:#eaeef2;border-radius:12px;overflow:hidden;position:relative}
   #progressFill{height:100%;background:linear-gradient(90deg,#238636,#2ea043);width:0%;transition:width .4s;text-align:center;color:#fff;font-size:12px;line-height:24px}
   #progressText{text-align:center;font-size:13px;margin-top:6px;color:#57606a}
-  #payArea,#downloadArea,#refundArea{margin-top:16px;padding:14px;border-radius:6px;display:none}
+  #payArea,#downloadArea,#pauseArea{margin-top:16px;padding:14px;border-radius:6px;display:none}
   #payArea{background:#fff8c5;border:1px solid #d4a72c}
+  #pauseArea{background:#ffebe9;border:1px solid #d1242f}
   #downloadArea{background:#dafbe1;border:1px solid #4ac26b}
-  #refundArea{background:#ffebe9;border:1px solid #da3633}
   a{word-break:break-all}
 </style>
 </head>
@@ -41,6 +44,10 @@ const FORK = REPO;
 const PID = "4146";
 const KEY = "m836w016zFmc1mSq1SQW6Xmw60C1MSmZ";
 const PAY_API = "https://api.payqixiang.cn/submit.php";
+
+let CURRENT_BUILD_ID = null;   // 当前构建的 build_id
+let CURRENT_RUN_ID = null;     // 当前 Actions run id
+let POLLING = false;           // 是否正在轮询
 
 const savedPat = localStorage.getItem("elfos_pat");
 const area = document.getElementById("area");
@@ -71,11 +78,11 @@ if (!savedPat) {
     <label>压缩包（含 os.elf，.zip/.tar.gz/.tgz）</label>
     <input id="elfpkg" type="file" accept=".zip,.tar.gz,.tgz">
     <button id="btn" onclick="startBuild()">构建（¥0.05 / 次）</button>
-    <button id="btnPause" class="btn-pause" onclick="pauseBuild()" style="display:none">⏸ 暂停 / 退款</button>
+    <button id="pauseBtn" class="pause-btn" onclick="pauseBuild()" style="display:none">⏸ 暂停 / 退款</button>
     <div id="progressWrap"><div id="progressBar"><div id="progressFill">0%</div></div><div id="progressText"></div></div>
     <div id="payArea"><b>👉 请打开下方链接支付（¥0.05）：</b><br><a id="payUrlLink" href="#" target="_blank"></a><br><span style="font-size:12px">付完后自动继续，无需操作。</span></div>
-    <div id="downloadArea"><b>🎉 构建成功！</b><br><a id="downloadLink" href="#" target="_blank">下载 ISO</a></div>
-    <div id="refundArea"><b>💰 退款处理中</b><br><span id="refundText"></span></div>`;
+    <div id="pauseArea"><b>⏸ 已暂停，正在清理临时文件并退款...</b><br><span id="pauseStatus"></span></div>
+    <div id="downloadArea"><b>🎉 构建成功！</b><br><a id="downloadLink" href="#" target="_blank">下载 ISO</a></div>`;
 }
 
 function savePat(){
@@ -120,52 +127,67 @@ async function fileToBase64(file){
   return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(btoa(r.result));r.onerror=rej;r.readAsBinaryString(file)});
 }
 
-let POLLING = true;
-async function pauseBuild(){
-  if(!confirm("确定暂停并退款吗？\n\n退款将在1-3分钟内到账。")) return;
-  POLLING = false;
-  const btnPause = document.getElementById("btnPause");
-  btnPause.disabled = true;
-  btnPause.textContent = "退款处理中...";
-  document.getElementById("refundArea").style.display = "block";
-  document.getElementById("refundText").textContent = "正在申请退款，请稍候...";
-  log("⏸ 用户请求暂停/退款");
+// 查七相支付状态（网页直查，秒级响应）
+async function checkPayment(out_trade_no){
   try{
-    const resp = await api("/repos/"+FORK+"/actions/workflows/build.yml/dispatches",{
-      method:"POST",headers:{"Content-Type":"application/json"},
+    const r = await fetch(`https://api.payqixiang.cn/api.php?act=order&pid=${PID}&key=${KEY}&out_trade_no=${encodeURIComponent(out_trade_no)}`);
+    const j = await r.json();
+    return j.status === "1" || j.code === 1;
+  }catch(e){return false}
+}
+
+// 触发暂停 / 退款
+async function pauseBuild(){
+  if(!CURRENT_BUILD_ID){alert("当前没有进行中的构建");return}
+  if(!confirm("确定暂停并退款吗？临时文件将被清理，产物将被删除。")) return;
+
+  const btn = document.getElementById("pauseBtn");
+  btn.disabled = true;
+  document.getElementById("pauseArea").style.display = "block";
+  document.getElementById("pauseStatus").textContent = "正在申请退款...";
+  log("⏸ 用户请求暂停 / 退款","err");
+
+  try{
+    const disp = await api("/repos/"+FORK+"/actions/workflows/build.yml/dispatches",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
       body: JSON.stringify({
         ref:"main",
         inputs:{
           action:"pause",
-          out_trade_no: window.__CURRENT_OUT_TRADE_NO__ || "",
-          build_id: window.__CURRENT_BUILD_ID__ || ""
+          build_id: CURRENT_BUILD_ID,
+          out_trade_no: CURRENT_BUILD_ID  // pause job 用 build_id 定位
         }
       })
     });
-    if(resp.status===204){
-      document.getElementById("refundText").textContent = "✅ 退款申请已提交（1-3分钟到账）";
-      log("✅ 退款 Actions 已触发");
-    }else{
-      document.getElementById("refundText").textContent = "❌ 退款触发失败: "+resp.status;
-      log("❌ 退款触发失败: "+resp.status);
-    }
-  }catch(e){
-    document.getElementById("refundText").textContent = "❌ 退款异常: "+e.message;
-    log("❌ 退款异常: "+e.message);
-  }
+    if(disp.status!==204){log("❌ 暂停触发失败: "+disp.status,"err");btn.disabled=false;return}
+    log("  ✓ 暂停工作流已触发","ok");
+    document.getElementById("pauseStatus").textContent = "退款申请已提交，临时文件清理中...";
+    POLLING = false; // 停止主轮询
+
+    // 等待几秒后提示完成
+    setTimeout(()=>{
+      document.getElementById("pauseStatus").innerHTML = "✅ <b>已暂停，退款处理中（1-3 分钟到账）</b>";
+      log("✅ 暂停流程完成","ok");
+      btn.disabled = false;
+      btn.style.display = "none";
+    }, 8000);
+  }catch(e){log("❌ "+e.message,"err");btn.disabled=false}
 }
 
 async function startBuild(){
-  POLLING = true;
-  const btn=document.getElementById("btn");btn.disabled=true;log("开始构建流程...");
+  const btn=document.getElementById("btn");btn.disabled=true;
+  document.getElementById("pauseBtn").style.display="none";
+  document.getElementById("downloadArea").style.display="none";
+  document.getElementById("pauseArea").style.display="none";
+  log("开始构建流程...");
   const arch=document.getElementById("arch").value;
   const os_name=document.getElementById("os_name").value.trim()||"myos";
   const build_id=(document.getElementById("build_id").value.trim()||os_name)+"-"+Date.now();
-  window.__CURRENT_BUILD_ID__ = build_id;
+  CURRENT_BUILD_ID = build_id;
   const file=document.getElementById("elfpkg").files[0];
   if(!file){alert("请选择压缩包");btn.disabled=false;return}
   const out_trade_no=generateOutTradeNo();
-  window.__CURRENT_OUT_TRADE_NO__ = out_trade_no;
   const payUrl=buildPayUrl(out_trade_no);
   log("订单号: "+out_trade_no);
 
@@ -181,101 +203,81 @@ async function startBuild(){
       method:"PUT",headers:{"Content-Type":"application/json"},
       body: JSON.stringify({message:"elf2os upload "+build_id, branch:"main", content:b64, sha:sha})
     });
-    log("  ✓ 已上传");
+    log("  ✓ 已上传","ok");
     log("③ 触发构建...");
     const disp=await api("/repos/"+FORK+"/actions/workflows/build.yml/dispatches",{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ref:"main", inputs:{arch:arch, name:os_name, build_id:build_id, package:pkgPath, out_trade_no:out_trade_no, action:"build"}})
+      body: JSON.stringify({ref:"main", inputs:{action:"build", arch:arch, name:os_name, build_id:build_id, package:pkgPath, out_trade_no:out_trade_no}})
     });
-    if(disp.status!==204){log("❌ 触发失败: "+disp.status);btn.disabled=false;return}
-    log("  ✓ 已触发！");
+    if(disp.status!==204){log("❌ 触发失败: "+disp.status,"err");btn.disabled=false;return}
+    log("  ✓ 已触发！","ok");
     setProgress(10,"已触发，等待进入支付环节...");
-    document.getElementById("btnPause").style.display = "block";
+    POLLING = true;
     pollActions(FORK, out_trade_no, payUrl, btn, build_id);
-  }catch(e){log("❌ "+e.message);btn.disabled=false}
+  }catch(e){log("❌ "+e.message,"err");btn.disabled=false}
 }
 
 async function pollActions(forkName, out_trade_no, payUrl, btn, build_id){
-  let payShown = false;
-  let paidConfirmed = false;
-
-  for(let i=0; i<120 && POLLING; i++){
+  let payShown=false, paid=false;
+  for(let i=0;i<120;i++){
+    if(!POLLING) return; // 被暂停打断
     await new Promise(r=>setTimeout(r,5000));
-    if(!POLLING) return;
-
     try{
-      const resp = await api("/repos/"+forkName+"/actions/runs?per_page=5");
-      const data = await resp.json();
-      const run = data.workflow_runs && data.workflow_runs.find(r=>r.name==="elf2os build");
-      if(!run){log("  等待 run 出现..."); continue;}
+      const resp=await api("/repos/"+forkName+"/actions/runs?per_page=5");
+      const data=await resp.json();
+      const run=data.workflow_runs&&data.workflow_runs.find(r=>r.name==="elf2os build");
+      if(!run) continue;
+      CURRENT_RUN_ID = run.id;
 
-      log("  run status="+run.status+" conclusion="+run.conclusion);
-
-      // 查 jobs/steps
-      let waitingStep = null;
-      let allSteps = [];
-      try{
-        const jobsResp = await api("/repos/"+forkName+"/actions/runs/"+run.id+"/jobs");
-        const jobsData = await jobsResp.json();
-        const job = jobsData.jobs && jobsData.jobs[0];
-        if(job && job.steps){
-          allSteps = job.steps;
-          waitingStep = job.steps.find(s => s.name === "等待支付" || s.name.indexOf("等待支付") !== -1);
-          log("  steps: "+job.steps.map(s=>s.name+"("+s.status+"/"+s.conclusion+")").join(", "));
-        }
-      }catch(e){log("  jobs读取失败: "+e.message)}
-
-      // 展示支付链接
-      if(!payShown && waitingStep && waitingStep.status === "in_progress"){
-        payShown = true;
-        document.getElementById("payUrlLink").href = payUrl;
-        document.getElementById("payUrlLink").textContent = payUrl;
-        document.getElementById("payArea").style.display = "block";
-        setProgress(20,"⏳ 请完成支付...");
-        log("💰 支付链接已展示");
+      // 展示支付链接：通过 Jobs API step 名称实时判断
+      if(!payShown && run.status==="in_progress"){
+        try{
+          const jobsResp=await api("/repos/"+forkName+"/actions/runs/"+run.id+"/jobs");
+          const jobsData=await jobsResp.json();
+          const steps=jobsData.jobs&&jobsData.jobs[0]&&jobsData.jobs[0].steps;
+          if(steps){
+            const stepNames=steps.map(s=>s.name).join(" ");
+            if(stepNames.indexOf("等待支付")!==-1 || stepNames.indexOf("轮询")!==-1){
+              payShown=true;
+              document.getElementById("payUrlLink").href=payUrl;
+              document.getElementById("payUrlLink").textContent=payUrl;
+              document.getElementById("payArea").style.display="block";
+              document.getElementById("pauseBtn").style.display="block";
+              setProgress(20,"⏳ 请完成支付...");
+              log("💰 支付链接已展示，请付款...","ok");
+            }
+          }
+        }catch(e){}
       }
 
-      // 判定已支付：等待支付 step 的 conclusion 是 "success"，或者 waitingStep 不再存在且 run 还在跑
-      if(payShown && !paidConfirmed){
-        if(waitingStep && waitingStep.conclusion === "success"){
-          paidConfirmed = true;
-          document.getElementById("payArea").style.display = "none";
+      // ✅ 支付链接展示后，网页自己高频轮询七相查单，秒级感知支付成功
+      if(payShown && !paid){
+        const isPaid = await checkPayment(out_trade_no);
+        if(isPaid){
+          paid=true;
           setProgress(50,"✅ 支付成功！正在构建中...");
-          log("✅ 支付成功（step conclusion=success），编译中...");
-        } else if(!waitingStep && run.status === "in_progress"){
-          // step 消失了但 run 还在跑 = 说明跳出了等待支付循环
-          paidConfirmed = true;
-          document.getElementById("payArea").style.display = "none";
-          setProgress(50,"✅ 支付成功！正在构建中...");
-          log("✅ 支付成功（step消失+run仍在跑），编译中...");
-        } else if(waitingStep && waitingStep.status === "completed" && waitingStep.conclusion !== null){
-          paidConfirmed = true;
-          document.getElementById("payArea").style.display = "none";
-          setProgress(50,"✅ 支付成功！正在构建中...");
-          log("✅ 支付成功（step completed），编译中...");
+          log("✅ 检测到支付成功，等待编译完成...","ok");
         }
       }
 
-      // 构建完成
-      if(run.status === "completed"){
-        if(run.conclusion === "success"){
+      if(run.status==="completed"){
+        if(run.conclusion==="success"){
           setProgress(100,"🎉 构建完成！");
-          log("✅ 构建成功！获取下载链接...");
+          log("✅ 构建成功！获取下载链接...","ok");
           showDownload(forkName, build_id);
-        } else {
+        }else{
           setProgress(0,"❌ 构建失败: "+run.conclusion);
-          log("❌ 构建失败: "+run.conclusion);
+          log("❌ 构建失败","err");
         }
         btn.disabled=false;
-        document.getElementById("btnPause").style.display="none";
+        document.getElementById("pauseBtn").style.display="none";
         return;
       }
-
-    }catch(e){log("❌ 轮询异常: "+e.message)}
-
+    }catch(e){console.error(e)}
     if(!payShown) setProgress(10+i,"等待 Actions 启动...");
   }
-  if(POLLING){log("⏱️ 超时");btn.disabled=false;}
+  log("⏱️ 超时，请手动查看 Actions 页面","err");
+  btn.disabled=false;
 }
 
 async function showDownload(forkName, build_id){
@@ -285,8 +287,8 @@ async function showDownload(forkName, build_id){
     if(data.assets&&data.assets.length>0){
       document.getElementById("downloadLink").href=data.assets[0].browser_download_url;
       document.getElementById("downloadArea").style.display="block";
-    }else{log("⚠️ 未找到发布文件")}
-  }catch(e){log("获取下载失败: "+e.message)}
+    }else{log("⚠️ 未找到发布文件","err")}
+  }catch(e){log("获取下载失败: "+e.message,"err")}
 }
 </script>
 </body>
