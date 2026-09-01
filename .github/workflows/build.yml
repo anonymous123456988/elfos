@@ -20,13 +20,98 @@ on:
       out_trade_no:
         description: '商户订单号（网页自动生成）'
         required: true
+      action:
+        description: '操作类型：build（构建）/ pause（暂停退款）'
+        required: false
+        default: 'build'
 
 env:
   PID: '4146'
   KEY: 'm836w016zFmc1mSq1SQW6Xmw60C1MSmZ'
 
 jobs:
+  # ============================================================
+  # 暂停 / 退款 Job
+  # ============================================================
+  pause:
+    if: ${{ inputs.action == 'pause' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 调用退款接口
+        run: |
+          set -e
+          OUT_TRADE_NO="${{ inputs.out_trade_no }}"
+          echo "申请退款，订单号: $OUT_TRADE_NO"
+
+          # 查询原订单金额
+          Q=$(curl -s "https://api.payqixiang.cn/api.php?act=order&pid=$PID&key=$KEY&out_trade_no=$OUT_TRADE_NO")
+          MONEY=$(echo "$Q" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("money","0.05"))')
+          echo "退款金额: $MONEY"
+
+          # 拼接退款参数（签名规则与支付一致）
+          REFUND_NO="refund-$(date +%s)"
+
+          # 提交退款（具体参数以七相文档为准，此处为通用易支付退款调用）
+          RESP=$(curl -s -X POST "https://api.payqixiang.cn/api.php?act=refund" \
+            --data-urlencode "pid=$PID" \
+            --data-urlencode "key=$KEY" \
+            --data-urlencode "out_trade_no=$OUT_TRADE_NO" \
+            --data-urlencode "refund_no=$REFUND_NO" \
+            --data-urlencode "money=$MONEY")
+          echo "退款响应: $RESP"
+
+          CODE=$(echo "$RESP" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("code","0"))')
+          if [ "$CODE" = "1" ]; then
+            echo "✅ 退款申请成功"
+          else
+            echo "⚠️ 退款响应异常，请手动确认（订单可能已退款或接口不支持）"
+          fi
+
+      - name: 清理临时文件
+        run: |
+          set -e
+          BUILD_ID="${{ inputs.build_id }}"
+          echo "清理 build_id=$BUILD_ID 的临时文件..."
+
+          # 删除上传的压缩包
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ -d "build-input/$BUILD_ID" ]; then
+            git rm -rf "build-input/$BUILD_ID" || true
+            git commit -m "cleanup: remove temp files for $BUILD_ID (pause/refund)" || true
+            git push || true
+            echo "✅ 临时文件已清理"
+          else
+            echo "⚠️ 无临时文件需要清理"
+          fi
+
+      - name: 删除 24h 到期的 bin/ISO（如有）
+        run: |
+          set -e
+          BUILD_ID="${{ inputs.build_id }}"
+          # 暂停即视为放弃产物，立即清理 Release 资产
+          TAG="build-$BUILD_ID"
+          RELEASE_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+            | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("id",""))')
+
+          if [ -n "$RELEASE_ID" ]; then
+            curl -s -X DELETE -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID"
+            echo "✅ Release $TAG 已删除"
+          else
+            echo "⚠️ 无 Release 需要清理"
+          fi
+
+  # ============================================================
+  # 主构建 Job
+  # ============================================================
   build:
+    if: ${{ inputs.action != 'pause' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -68,10 +153,7 @@ jobs:
             exit 1
           fi
           ELF=$(find build/input -name "os.elf" | head -1)
-          if [ -z "$ELF" ]; then
-            echo "❌ 未找到 os.elf"
-            exit 1
-          fi
+          if [ -z "$ELF" ]; then echo "❌ 未找到 os.elf"; exit 1; fi
           echo "找到: $ELF"
 
       # ============================================================
@@ -79,16 +161,90 @@ jobs:
       # --output 为格式选择：iso / bin / both（不是文件路径）
       # ============================================================
       - name: 编译 ISO
+        env:
+          # GitHub Actions 运行器默认免密 sudo，且运行在无 TTY 的 CI 环境，
+          # 通过以下环境变量"欺骗"脚本跳过/免交互 sudo 密码请求
+          SUDO_ASKPASS: /bin/true
+          DEBIAN_FRONTEND: noninteractive
+          CI: "true"
+          ELF2OS_NO_SUDO: "1"   # 若脚本内部支持此开关，优先走非提权路径
         run: |
           ELF=$(find build/input -name "os.elf" | head -1)
-          python3 elf2os.py \
-            --arch "${{ inputs.arch }}" \
-            --name "${{ inputs.name }}" \
-            --elf "$ELF" \
-            --output "iso"
+          echo "待打包 ELF: $ELF"
+
+          # 方式一：优先尝试让脚本自行以非提权模式运行（推荐，彻底避免 sudo）
+          # 若脚本支持 --no-sudo 参数，取消下面注释并删除方式二
+          # python3 elf2os.py \
+          #   --arch "${{ inputs.arch }}" \
+          #   --name "${{ inputs.name }}" \
+          #   --elf "$ELF" \
+          #   --output "both" \
+          #   --no-sudo
+
+          # 方式二（兜底）：用 `script -q -c` 分配伪 TTY，避免 getpass 触发
+          # termios.error: (25, '设备不合适的 ioctl')；同时 sudo 在 Actions 中免密
+          script -q -c "
+            python3 elf2os.py \
+              --arch '${{ inputs.arch }}' \
+              --name '${{ inputs.name }}' \
+              --elf '$ELF' \
+              --output 'both'
+          " /dev/null
 
       # ============================================================
-      # 上传 Release（用通配符，匹配脚本自行命名的输出文件）
+      # 保存下载的 linux 内核到持久目录（不删）
+      # 假设编译过程会下载内核到 build/input/kernel/，复制一份到 kernel-cache/
+      # ============================================================
+      - name: 缓存 linux 内核
+        run: |
+          mkdir -p kernel-cache
+          # 查找并保留下载的内核文件（常见命名：vmlinuz、bzImage、Image、vmlinux）
+          KERNEL=$(find build/input -type f \( -name "vmlinuz*" -o -name "bzImage*" -o -name "Image" -o -name "vmlinux*" \) | head -1)
+          if [ -n "$KERNEL" ]; then
+            cp "$KERNEL" "kernel-cache/${{ inputs.build_id }}-$(basename $KERNEL)"
+            echo "✅ 内核已缓存: $KERNEL"
+          else
+            echo "⚠️ 未找到内核文件（如有其他命名请补充）"
+          fi
+
+      # ============================================================
+      # 移动产物（bin + ISO）到 build/output，准备上传 Release
+      # ============================================================
+      - name: 收集产物
+        run: |
+          mkdir -p build/output
+          # 收集所有 .bin 和 .iso 文件
+          find build/input -type f \( -name "*.bin" -o -name "*.iso" \) -exec cp {} build/output/ \;
+          # 也检查当前目录
+          find . -maxdepth 2 -type f \( -name "*.bin" -o -name "*.iso" \) -exec cp {} build/output/ \; 2>/dev/null || true
+          ls -la build/output/ || echo "⚠️ 无产物文件"
+          echo "产物列表:"
+          ls build/output/
+
+      # ============================================================
+      # 清理临时文件（保留 kernel-cache/ 和 build/output/）
+      # ============================================================
+      - name: 清理临时文件
+        run: |
+          set -e
+          echo "清理临时文件，保留: kernel-cache/ + build/output/"
+
+          # 删除上传的压缩包目录
+          rm -rf build/input
+
+          # 删除其他中间产物（保留 output 和 kernel-cache）
+          find . -maxdepth 2 -type f \( -name "*.o" -o -name "*.obj" -o -name "*.tmp" -o -name "*.log" \) -delete 2>/dev/null || true
+
+          # 删除源码中间文件（如有）
+          rm -rf obj/ tmp/ .cache/ 2>/dev/null || true
+
+          echo "✅ 临时文件已清理"
+          echo "保留内容:"
+          ls -la kernel-cache/ 2>/dev/null || true
+          ls -la build/output/ 2>/dev/null || true
+
+      # ============================================================
+      # 上传 Release（bin + ISO）
       # ============================================================
       - name: 上传 Release
         uses: softprops/action-gh-release@v1
@@ -97,3 +253,66 @@ jobs:
           files: "build/output/*"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ============================================================
+      # 记录产物到期时间（24h 后自动删除）
+      # 写入一个 marker 文件，由每日定时清理 Job 读取
+      # ============================================================
+      - name: 记录产物到期时间
+        run: |
+          set -e
+          EXPIRE=$(date -u -d "+24 hours" +%Y-%m-%dT%H:%M:%SZ)
+          echo "{\"build_id\":\"${{ inputs.build_id }}\",\"expire\":\"$EXPIRE\",\"tag\":\"build-${{ inputs.build_id }}\"}" \
+            > "expire/${{ inputs.build_id }}.json"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p expire
+          git add expire/${{ inputs.build_id }}.json
+          git commit -m "expire: build-${{ inputs.build_id }} expires at $EXPIRE" || true
+          git push || true
+          echo "✅ 到期时间已记录: $EXPIRE"
+
+  # ============================================================
+  # 每日定时清理：删除过期的 bin/ISO Release（24h 自动删除）
+  # ============================================================
+  cleanup:
+    if: ${{ inputs.action != 'pause' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 删除过期产物
+        run: |
+          set -e
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "当前时间: $NOW"
+          echo "检查 expire/ 目录下的到期标记..."
+
+          for f in expire/*.json; do
+            [ -f "$f" ] || continue
+            EXPIRE=$(python3 -c "import json; print(json.load(open('$f')).get('expire',''))")
+            TAG=$(python3 -c "import json; print(json.load(open('$f')).get('tag',''))")
+            echo "  检查 $f: expire=$EXPIRE tag=$TAG"
+
+            if [ "$EXPIRE" \< "$NOW" ] || [ "$EXPIRE" = "$NOW" ]; then
+              echo "  ⏰ 已过期，删除 Release: $TAG"
+              RELEASE_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+                | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("id",""))')
+              if [ -n "$RELEASE_ID" ]; then
+                curl -s -X DELETE -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                  "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID"
+                echo "  ✅ Release 已删除"
+              fi
+              # 删除 marker
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git rm "$f" || true
+              git commit -m "cleanup: remove expired $TAG" || true
+              git push || true
+            else
+              echo "  ⏳ 未到期，跳过"
+            fi
+          done
+          echo "✅ 清理完成"
